@@ -31,9 +31,10 @@ repos:
     hooks:
       - id: sqlfluff-lint
         name: sqlfluff lint (dbt templater)
-        entry: sqlfluff lint
+        # One invocation over the models directory. Passing each file as an argument makes the
+        # dbt templater open DuckDB once per file, and DuckDB refuses a second lock on the same
+        # path. `sqlfluff lint warehouse/models` compiles the project once instead.
+        entry: sqlfluff lint warehouse/models
         language: system
-        types: [sql]
-        # Models only. Macro files are Jinja control flow with no parseable SQL of their own, and
-        # the generic tests are templates whose SQL depends on the arguments they are called with.
+        pass_filenames: false
         files: ^warehouse/models/.*\.sql$

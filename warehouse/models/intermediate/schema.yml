@@ -1,0 +1,106 @@
+version: 2
+
+models:
+  - name: int_cash_flows_usd
+    description: >
+      Cash flows converted to USD and signed once for the whole project. EUR flows use the rate on
+      the flow date itself, via an equi-join rather than an as-of lookup: the FX series is
+      calendar-daily and complete, so a missing rate becomes a NULL that the not_null test on
+      amount_usd fails, whereas an as-of join would silently carry a stale rate forward.
+    columns:
+      - name: cash_flow_id
+        data_tests: [unique, not_null]
+      - name: amount_usd
+        description: "Not-null here is the proof of FX coverage for every EUR flow date."
+        data_tests: [not_null]
+      - name: flow_direction
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [-1, 1]
+                quote: false
+      - name: signed_amount_usd
+        data_tests: [not_null]
+
+  - name: int_nav_usd
+    description: >
+      Quarter-end NAV in USD, converted at the rate on the quarter-end date itself. The valuation
+      date is the conversion date; using any other would mix a value measured at one moment with a
+      rate from another.
+    columns:
+      - name: nav_usd
+        data_tests: [not_null, nav_non_negative]
+    data_tests:
+      - unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [fund_id, investor_id, quarter_end]
+
+  - name: int_quarter_spine
+    description: >
+      One row per fund x investor x quarter end, from the position's first capital call to the last
+      quarter it reports. Built from the cash flows rather than derived from the NAV table, so a
+      NAV row missing from the middle of a position's life surfaces as a NULL downstream instead of
+      silently shortening the series.
+
+      A position whose last quarter precedes the as-of quarter has liquidated; that is how the raw
+      layer signals liquidation, since fund life is not published.
+    columns:
+      - name: quarter_end
+        data_tests: [not_null]
+    data_tests:
+      - unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [fund_id, investor_id, quarter_end]
+
+  - name: int_cumulative_flows_by_quarter
+    description: >
+      Inception-to-date cash flow position per fund x investor at each quarter end. Every figure is
+      cumulative as at quarter_end, not a per-quarter movement, which is the as-of convention the
+      whole metrics layer uses. Amounts are unsigned magnitudes; the signed vector IRR needs lives
+      in int_cash_flows_usd.
+    columns:
+      - name: paid_in_usd
+        description: "Capital calls plus management fees, cumulative."
+        data_tests: [not_null]
+      - name: distributions_usd
+        description: "Distributions plus recallable distributions, cumulative."
+        data_tests: [not_null]
+      - name: recallable_distributions_usd
+        data_tests: [not_null]
+    data_tests:
+      - unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [fund_id, investor_id, quarter_end]
+
+  - name: int_returns_by_quarter
+    description: >
+      Net IRR and KS-PME per fund x investor x quarter end, computed by a dbt Python model that
+      imports lp_lens.metrics.returns -- the same module the reconciliation tests call. IRR has no
+      closed form, so solving it in SQL would mean a recursive CTE implementing Newton's method or
+      a hard-coded approximation, and either would be a second implementation of tested arithmetic.
+
+      Both columns are nullable on purpose and are emitted as pandas Float64 so a missing value
+      lands as NULL rather than NaN. A NaN would pass a not-null test and then read as a number.
+    columns:
+      - name: net_irr
+        description: "NULL, never 0, where no rate exists."
+      - name: ks_pme
+    data_tests:
+      - unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [fund_id, investor_id, as_of_quarter]
+
+  - name: int_portfolio_returns_by_quarter
+    description: >
+      Net IRR and KS-PME per investor x quarter end, solved over every flow of every position pooled
+      into one vector. A separate model rather than an aggregation of int_returns_by_quarter because
+      IRR is not additive: no average of fund IRRs, weighted or otherwise, equals the rate the
+      pooled stream produced.
+    columns:
+      - name: net_irr
+      - name: ks_pme
+    data_tests:
+      - unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [investor_id, as_of_quarter]

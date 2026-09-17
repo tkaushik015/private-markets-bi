@@ -1,0 +1,14 @@
+# Phase 2 targets DuckDB only. The Snowflake output arrives in Phase 3, with every credential
+# coming from an environment variable; nothing account-specific is committed here or there.
+lp_lens:
+  target: local
+  outputs:
+    local:
+      type: duckdb
+      # Relative to the process working directory, not to this file. Every tool in this project is
+      # run from the repository root -- dbt with `--project-dir warehouse`, and sqlfluff's dbt
+      # templater from wherever pre-commit invokes it -- so the default is repo-root relative and
+      # `data/warehouse/` is kept in git by a .gitkeep so a fresh clone can lint without building
+      # first. The env var is what CI and the pytest harness override to a scratch path.
+      path: "{{ env_var('LP_LENS_DB_PATH', 'data/warehouse/lp_lens.duckdb') }}"
+      threads: 4

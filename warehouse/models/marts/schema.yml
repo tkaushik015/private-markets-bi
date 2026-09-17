@@ -1,0 +1,625 @@
+version: 2
+
+models:
+  # ------------------------------------------------------------------------------------------
+  # Dimensions
+  # ------------------------------------------------------------------------------------------
+  - name: dim_manager
+    description: "Grain: one row per general partner. All names are synthetic."
+    config:
+      contract:
+        enforced: true
+    columns:
+      - name: manager_id
+        data_type: varchar
+        description: "Primary key. Surrogate id of the form MGRnnnn."
+        data_tests: [unique, not_null]
+      - name: manager_name
+        data_type: varchar
+        description: "Invented firm name. Not a real manager."
+        data_tests: [not_null, unique]
+      - name: hq_region
+        data_type: varchar
+        description: "Region of the firm's headquarters."
+        data_tests: [not_null]
+      - name: founded_year
+        data_type: integer
+        description: "Year the firm was founded."
+        data_tests: [not_null]
+
+  - name: dim_fund
+    description: "Grain: one row per fund. All names are synthetic."
+    config:
+      contract:
+        enforced: true
+    columns:
+      - name: fund_id
+        data_type: varchar
+        description: "Primary key. Surrogate id of the form FUNDnnnn."
+        data_tests: [unique, not_null]
+      - name: manager_id
+        data_type: varchar
+        description: "The general partner running the fund."
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_manager')
+                field: manager_id
+      - name: fund_name
+        data_type: varchar
+        description: "Invented fund name, of the form '<manager stem> <strategy> <numeral>'."
+        data_tests: [not_null]
+      - name: strategy
+        data_type: varchar
+        description: "Investment strategy. Joins to dim_strategy for the coarser grouping."
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_strategy')
+                field: strategy_name
+          - accepted_values:
+              arguments:
+                values:
+                  [Buyout, Venture, Growth, Private Credit, Real Estate, Infrastructure, Secondaries]
+      - name: vintage_year
+        data_type: integer
+        description: "Year the fund began investing. The reference year for fund age and vintage cohorts."
+        data_tests: [not_null]
+      - name: vintage_start_date
+        data_type: date
+        description: >
+          1 January of the vintage year. The point fund age is measured from and the start of the
+          fund's modelled life.
+        data_tests: [not_null]
+      - name: fund_currency
+        data_type: varchar
+        description: "Denomination of the fund. Drives which flows need FX conversion."
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [USD, EUR]
+      - name: fund_size
+        data_type: double
+        description: "Total fund size in the fund's own currency, not USD."
+        data_tests: [not_null]
+      - name: geography_focus
+        data_type: varchar
+        description: "Stated investment geography."
+        data_tests: [not_null]
+
+  - name: dim_investor
+    description: "Grain: one row per limited partner. All names are synthetic."
+    config:
+      contract:
+        enforced: true
+    columns:
+      - name: investor_id
+        data_type: varchar
+        description: "Primary key. Surrogate id of the form LPnnn."
+        data_tests: [unique, not_null]
+      - name: investor_name
+        data_type: varchar
+        description: "Invented institution name, consistent with investor_type."
+        data_tests: [not_null, unique]
+      - name: investor_type
+        data_type: varchar
+        description: "Institution category."
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [Pension, Endowment, Insurance, Family Office, Sovereign Wealth]
+
+  - name: dim_strategy
+    description: >
+      Grain: one row per strategy present in the fund population. Built from the funds that exist
+      rather than from a fixed list, so a strategy with no funds does not appear as an empty row in
+      every breakdown.
+    config:
+      contract:
+        enforced: true
+    columns:
+      - name: strategy_name
+        data_type: varchar
+        description: "Primary key. The strategy as recorded on the fund."
+        data_tests: [unique, not_null]
+      - name: strategy_group
+        data_type: varchar
+        description: >
+          Coarser rollup, assigned here rather than sourced -- the raw layer carries only the seven
+          strategy names. It lives in one documented place so reports do not each invent their own
+          grouping.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [Private Equity, Private Credit, Real Assets]
+
+  - name: dim_date
+    description: >
+      Grain: one row per calendar day, from the earliest cash flow to the as-of date. Daily because
+      cash flows land on irregular dates, with quarter-end flags because valuations and every
+      performance metric sit on quarter ends.
+
+      This replaces the equities trading-day calendar the project inherited. Private markets have no
+      trading calendar: 30 June 2024 is a Sunday and is still a valuation date.
+    config:
+      contract:
+        enforced: true
+    columns:
+      - name: date_day
+        data_type: date
+        description: "Primary key. The calendar date."
+        data_tests: [unique, not_null]
+      - name: calendar_year
+        data_type: integer
+        data_tests: [not_null]
+      - name: calendar_quarter
+        data_type: integer
+        description: "1 to 4."
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [1, 2, 3, 4]
+                quote: false
+      - name: calendar_month
+        data_type: integer
+        data_tests: [not_null]
+      - name: day_of_month
+        data_type: integer
+        data_tests: [not_null]
+      - name: year_quarter_label
+        data_type: varchar
+        description: "Display label, e.g. 2024-Q2."
+        data_tests: [not_null]
+      - name: quarter_end_date
+        data_type: date
+        description: >
+          The quarter end this day belongs to. Lets a daily fact roll up to its reporting quarter
+          without date arithmetic in the report layer.
+        data_tests: [not_null]
+      - name: is_quarter_end
+        data_type: boolean
+        description: "True on 31 March, 30 June, 30 September and 31 December."
+        data_tests: [not_null]
+      - name: is_month_end
+        data_type: boolean
+        data_tests: [not_null]
+      - name: is_year_end
+        data_type: boolean
+        data_tests: [not_null]
+
+  # ------------------------------------------------------------------------------------------
+  # Facts
+  # ------------------------------------------------------------------------------------------
+  - name: fct_cash_flows
+    description: >
+      Grain: one row per cash flow. Irregular by nature -- a row exists where a transaction
+      happened, and there is no row for a date with no activity.
+
+      Both the unsigned source magnitude and the signed USD figure are published, so a consumer
+      never has to re-derive the sign convention and cannot get it wrong.
+    config:
+      contract:
+        enforced: true
+    data_tests:
+      - unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [fund_id, investor_id, flow_date, flow_type, cash_flow_id]
+    columns:
+      - name: cash_flow_id
+        data_type: varchar
+        description: "Primary key. Surrogate id of the form CFnnnnnnn."
+        data_tests: [unique, not_null]
+      - name: fund_id
+        data_type: varchar
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_fund')
+                field: fund_id
+      - name: investor_id
+        data_type: varchar
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_investor')
+                field: investor_id
+      - name: flow_date
+        data_type: date
+        description: "Date the transaction settled. Irregular; not aligned to quarter ends."
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_date')
+                field: date_day
+      - name: flow_type
+        data_type: varchar
+        description: >
+          Direction and nature of the flow. capital_call and management_fee are paid by the LP and
+          count toward paid-in; distribution and recallable_distribution are received.
+          recallable_distribution additionally restores callable headroom.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [capital_call, management_fee, distribution, recallable_distribution]
+      - name: amount
+        data_type: double
+        description: >
+          Unsigned magnitude in the flow's own currency, exactly as the source states it. Always
+          strictly positive; the direction is in flow_type, never in the sign.
+        data_tests: [not_null]
+      - name: flow_currency
+        data_type: varchar
+        description: "Currency of `amount`, inherited from the fund."
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [USD, EUR]
+      - name: amount_usd
+        data_type: double
+        description: >
+          `amount` converted to USD at the EUR/USD rate on flow_date itself. USD flows pass
+          through unchanged. Not-null here is the test that proves FX coverage: a missing rate would
+          show up as a NULL rather than as a silently stale conversion.
+        data_tests: [not_null]
+      - name: flow_direction
+        data_type: integer
+        description: "-1 for flows the LP pays, +1 for flows it receives."
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [-1, 1]
+                quote: false
+      - name: signed_amount_usd
+        data_type: double
+        description: >
+          `flow_direction * amount_usd`. The LP-view signed figure that IRR and PME consume. Summing
+          this column across mixed flow types gives net cash flow, which is meaningful; summing
+          `amount` across mixed types is not.
+        data_tests: [not_null]
+
+  - name: fct_nav_quarterly
+    description: >
+      Grain: fund_id x investor_id x quarter_end. A regular quarterly grid, in contrast to the
+      irregular cash flow grain.
+
+      Driven off int_quarter_spine rather than off the source NAV table, so a quarter missing from
+      the middle of a position's history surfaces as a NULL for the not_null test to fail on instead
+      of vanishing from the series. The series ends at liquidation or at the as-of date, whichever
+      comes first.
+    config:
+      contract:
+        enforced: true
+    data_tests:
+      - unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [fund_id, investor_id, quarter_end]
+    columns:
+      - name: fund_id
+        data_type: varchar
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_fund')
+                field: fund_id
+      - name: investor_id
+        data_type: varchar
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_investor')
+                field: investor_id
+      - name: quarter_end
+        data_type: date
+        description: "Valuation date. Always a real quarter end."
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_date')
+                field: date_day
+      - name: nav
+        data_type: double
+        description: >
+          Net asset value in the fund's own currency. Zero for a fully liquidated position, which is
+          a real reported value and distinct from NULL, which would mean not reported.
+        data_tests: [not_null, nav_non_negative]
+      - name: nav_currency
+        data_type: varchar
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [USD, EUR]
+      - name: nav_usd
+        data_type: double
+        description: >
+          NAV converted at the EUR/USD rate on the quarter-end date itself -- the valuation date is
+          also the conversion date. This is why the FX series is calendar-daily: a quarter end
+          falling on a weekend still needs a rate.
+        data_tests: [not_null, nav_non_negative]
+
+  - name: fct_fund_performance_quarterly
+    description: >
+      Grain: fund_id x investor_id x as_of_quarter. One row per position per quarter end, carrying
+      that position's inception-to-date performance as at that quarter.
+
+      A point-in-time series rather than a single snapshot: `is_latest_quarter` selects the current
+      row per position. All amounts are USD.
+
+      {{ doc("as_of_convention") }}
+    config:
+      contract:
+        enforced: true
+    data_tests:
+      - unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [fund_id, investor_id, as_of_quarter]
+      - tvpi_equals_dpi_plus_rvpi:
+          arguments:
+            column_name: tvpi
+            dpi_column: dpi
+            rvpi_column: rvpi
+            tolerance: 1e-9
+      # Run on the fund-currency columns, because that is the only currency the contractual cap
+      # holds in. Each call is converted at the rate on its own date while the commitment is fixed
+      # at the rate on signing, so for a fund whose currency strengthened the USD paid-in total can
+      # legitimately exceed the USD commitment. That is FX, not overdrawing.
+      - paid_in_lte_commitment_plus_recallable:
+          arguments:
+            column_name: paid_in_local
+            commitment_column: commitment_local
+            recallable_column: recallable_distributions_local
+    columns:
+      - name: fund_id
+        data_type: varchar
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_fund')
+                field: fund_id
+      - name: investor_id
+        data_type: varchar
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_investor')
+                field: investor_id
+      - name: as_of_quarter
+        data_type: date
+        description: "The reporting quarter end. Every figure in the row is as at this date."
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_date')
+                field: date_day
+      - name: commitment_usd
+        data_type: double
+        description: '{{ doc("metric_commitment") }}'
+        data_tests: [not_null]
+      - name: paid_in_usd
+        data_type: double
+        description: '{{ doc("metric_paid_in") }}'
+        data_tests: [not_null]
+      - name: capital_calls_usd
+        data_type: double
+        description: "Capital calls only, cumulative to as_of_quarter. Excludes management fees."
+        data_tests: [not_null]
+      - name: management_fees_usd
+        data_type: double
+        description: "Management fees only, cumulative to as_of_quarter."
+        data_tests: [not_null]
+      - name: distributions_usd
+        data_type: double
+        description: >
+          Distributions plus recallable distributions, cumulative to as_of_quarter. The numerator
+          of DPI.
+        data_tests: [not_null]
+      - name: recallable_distributions_usd
+        data_type: double
+        description: >
+          The recallable subset of distributions, cumulative to as_of_quarter. Broken out because it
+          raises the callable ceiling, so both unfunded commitment and the paid-in cap depend on it.
+        data_tests: [not_null]
+      - name: unfunded_usd
+        data_type: double
+        description: '{{ doc("metric_unfunded") }}'
+        data_tests: [not_null]
+      - name: fund_currency
+        data_type: varchar
+        description: "Currency the `_local` columns below are denominated in."
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [USD, EUR]
+      - name: commitment_local
+        data_type: double
+        description: >
+          Committed capital in the fund's own currency, exactly as contracted and never converted.
+        data_tests: [not_null]
+      - name: paid_in_local
+        data_type: double
+        description: >
+          Paid-in capital in the fund's own currency, cumulative to as_of_quarter.
+
+          Published alongside the USD figure because the contractual cap on how much an LP can be
+          drawn is a fund-currency obligation, and this is the only currency it holds in. Each call
+          is converted at the rate on its own date while the commitment is fixed at the rate on
+          signing, so for a fund whose currency strengthened the USD total can legitimately exceed
+          the USD commitment. The `paid_in_lte_commitment_plus_recallable` test runs on these
+          columns for that reason.
+        data_tests: [not_null]
+      - name: recallable_distributions_local
+        data_type: double
+        description: "The recallable subset in the fund's own currency, cumulative to as_of_quarter."
+        data_tests: [not_null]
+      - name: unfunded_local
+        data_type: double
+        description: >
+          `commitment_local + recallable_distributions_local - paid_in_local`. The still-callable
+          amount as the fund's partnership agreement would state it. Non-negative by the same
+          contractual cap.
+        data_tests: [not_null]
+      - name: nav_usd
+        data_type: double
+        description: >
+          Residual value at as_of_quarter, in USD. Zero for a liquidated position. Not coalesced
+          from NULL: a missing NAV row is a source gap and must surface rather than read as
+          worthless.
+        data_tests: [not_null, nav_non_negative]
+      - name: dpi
+        data_type: double
+        description: '{{ doc("metric_dpi") }}'
+      - name: rvpi
+        data_type: double
+        description: '{{ doc("metric_rvpi") }}'
+      - name: tvpi
+        data_type: double
+        description: '{{ doc("metric_tvpi") }}'
+      - name: net_irr
+        data_type: double
+        description: '{{ doc("metric_net_irr") }}'
+      - name: ks_pme
+        data_type: double
+        description: '{{ doc("metric_ks_pme") }}'
+      - name: fund_age_years
+        data_type: double
+        description: >
+          Years from the fund's vintage start (1 January of the vintage year) to as_of_quarter,
+          as whole days divided by 365.25. Days rather than a difference of calendar years, because
+          a January-vintage fund and a December-vintage fund are not the same age at the same
+          quarter end.
+        data_tests: [not_null]
+      - name: is_latest_quarter
+        data_type: boolean
+        description: >
+          True on the most recent as_of_quarter for this position. For a liquidated position that is
+          its liquidation quarter, not the overall as-of date.
+        data_tests: [not_null]
+
+  - name: fct_portfolio_performance_quarterly
+    description: >
+      Grain: investor_id x as_of_quarter. One row per investor per quarter end, carrying that
+      investor's whole private markets programme as at that quarter. All amounts are USD.
+
+      Aggregated from the cash flows and NAV directly, **not** from fct_fund_performance_quarterly.
+      A fund that liquidated in 2020 has no row in the fund-level fact at 2024, so summing that fact
+      would drop its history out of the inception-to-date totals and overstate every ratio.
+
+      Ratios are ratios of sums, never averages of fund ratios, and net_irr is solved over every
+      flow of every position pooled into one vector.
+
+      {{ doc("as_of_convention") }}
+    config:
+      contract:
+        enforced: true
+    data_tests:
+      - unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [investor_id, as_of_quarter]
+      - tvpi_equals_dpi_plus_rvpi:
+          arguments:
+            column_name: tvpi
+            dpi_column: dpi
+            rvpi_column: rvpi
+            tolerance: 1e-9
+      # No paid-in cap test at this grain, deliberately. The cap is a per-commitment contractual
+      # limit in the fund's currency; a pooled multi-currency total across an investor's whole
+      # programme has no such ceiling, and asserting one would be inventing a constraint. The cap
+      # is enforced at the position grain in fct_fund_performance_quarterly, where it is real.
+    columns:
+      - name: investor_id
+        data_type: varchar
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_investor')
+                field: investor_id
+      - name: as_of_quarter
+        data_type: date
+        description: "The reporting quarter end. Every figure in the row is as at this date."
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_date')
+                field: date_day
+      - name: commitment_usd
+        data_type: double
+        description: >
+          Total committed across every fund the investor had signed on or before as_of_quarter.
+          {{ doc("metric_commitment") }}
+        data_tests: [not_null]
+      - name: fund_count
+        data_type: bigint
+        description: "Number of funds committed to on or before as_of_quarter, including liquidated ones."
+        data_tests: [not_null]
+      - name: paid_in_usd
+        data_type: double
+        description: '{{ doc("metric_paid_in") }}'
+        data_tests: [not_null]
+      - name: capital_calls_usd
+        data_type: double
+        description: "Capital calls only, pooled across the investor's funds, cumulative to as_of_quarter."
+        data_tests: [not_null]
+      - name: management_fees_usd
+        data_type: double
+        description: "Management fees only, pooled across the investor's funds, cumulative to as_of_quarter."
+        data_tests: [not_null]
+      - name: distributions_usd
+        data_type: double
+        description: "Distributions plus recallable distributions, pooled, cumulative to as_of_quarter."
+        data_tests: [not_null]
+      - name: recallable_distributions_usd
+        data_type: double
+        description: "The recallable subset, pooled, cumulative to as_of_quarter."
+        data_tests: [not_null]
+      - name: unfunded_usd
+        data_type: double
+        description: '{{ doc("metric_unfunded") }}'
+        data_tests: [not_null]
+      - name: nav_usd
+        data_type: double
+        description: >
+          Residual value pooled across the investor's positions at as_of_quarter. Coalesced to zero
+          here, unlike the fund-level fact: a fund with no NAV row at this quarter has liquidated and
+          genuinely contributes zero, and the fund-level not_null test is what guards against a real
+          source gap.
+        data_tests: [not_null, nav_non_negative]
+      - name: dpi
+        data_type: double
+        description: '{{ doc("metric_dpi") }}'
+      - name: rvpi
+        data_type: double
+        description: '{{ doc("metric_rvpi") }}'
+      - name: tvpi
+        data_type: double
+        description: '{{ doc("metric_tvpi") }}'
+      - name: net_irr
+        data_type: double
+        description: '{{ doc("metric_net_irr") }}'
+      - name: ks_pme
+        data_type: double
+        description: '{{ doc("metric_ks_pme") }}'
+      - name: is_latest_quarter
+        data_type: boolean
+        description: "True on the most recent as_of_quarter for this investor."
+        data_tests: [not_null]

@@ -1,0 +1,133 @@
+version: 2
+
+models:
+  - name: stg_managers
+    description: "Renaming and casting only. `name` becomes manager_name; three dimensions carry a `name` column and an unqualified one is ambiguous once two are joined."
+    columns:
+      - name: manager_id
+        data_tests: [unique, not_null]
+      - name: manager_name
+        data_tests: [not_null]
+
+  - name: stg_funds
+    description: "Renaming and casting only. `currency` becomes fund_currency."
+    columns:
+      - name: fund_id
+        data_tests: [unique, not_null]
+      - name: manager_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_managers')
+                field: manager_id
+      - name: strategy
+        data_tests: [not_null]
+      - name: fund_currency
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [USD, EUR]
+
+  - name: stg_investors
+    description: "Renaming and casting only."
+    columns:
+      - name: investor_id
+        data_tests: [unique, not_null]
+      - name: investor_name
+        data_tests: [not_null]
+
+  - name: stg_commitments
+    description: "Renaming and casting only. commitment_amount is in the fund's currency, not USD."
+    columns:
+      - name: commitment_id
+        data_tests: [unique, not_null]
+      - name: fund_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_funds')
+                field: fund_id
+      - name: investor_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_investors')
+                field: investor_id
+      - name: commitment_amount
+        data_tests: [not_null]
+      - name: commitment_date
+        data_tests: [not_null]
+    data_tests:
+      - unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [investor_id, fund_id]
+
+  - name: stg_cash_flows
+    description: >
+      Renaming and casting only. `amount` stays an unsigned magnitude here; the sign convention is
+      applied once, in int_cash_flows_usd.
+    columns:
+      - name: cash_flow_id
+        data_tests: [unique, not_null]
+      - name: flow_type
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [capital_call, management_fee, distribution, recallable_distribution]
+      - name: flow_date
+        data_tests: [not_null]
+      - name: amount
+        data_tests: [not_null]
+      - name: flow_currency
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [USD, EUR]
+
+  - name: stg_nav
+    description: "Renaming and casting only. NAV is in the fund's currency."
+    columns:
+      - name: quarter_end
+        data_tests: [not_null]
+      - name: nav
+        data_tests: [not_null, nav_non_negative]
+    data_tests:
+      - unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [fund_id, investor_id, quarter_end]
+
+  - name: stg_fx_rates
+    description: >
+      Renaming and casting only. Calendar-daily EUR/USD, covering every date from the earliest
+      vintage to the as-of date. max(rate_date) is the project's as-of date -- the generator
+      produces FX to that date and no further -- which is how the models derive it instead of
+      carrying a duplicated constant.
+    columns:
+      - name: rate_date
+        data_tests: [not_null]
+      - name: fx_rate
+        data_tests: [not_null]
+    data_tests:
+      - unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [rate_date, from_currency, to_currency]
+
+  - name: stg_public_index
+    description: >
+      Renaming and casting only. Calendar-daily synthetic total-return index levels used as the PME
+      benchmark. Not a real index.
+    columns:
+      - name: index_date
+        data_tests: [not_null]
+      - name: index_level
+        data_tests: [not_null]
+    data_tests:
+      - unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [index_date, index_name]

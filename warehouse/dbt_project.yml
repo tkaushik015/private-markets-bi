@@ -1,0 +1,32 @@
+name: lp_lens_warehouse
+version: 0.1.0
+config-version: 2
+profile: lp_lens
+
+# The project name must stay equal to the dispatch namespace in macros/cross_db.sql. Change one,
+# change both, or adapter.dispatch silently stops finding the snowflake__ variants.
+
+model-paths: ["models"]
+macro-paths: ["macros"]
+test-paths: ["tests"]
+target-path: "target"
+clean-targets: ["target", "dbt_packages"]
+
+require-dbt-version: [">=1.10.0", "<2.0.0"]
+
+models:
+  lp_lens_warehouse:
+    staging:
+      +materialized: view
+      +schema: staging
+    intermediate:
+      +materialized: view
+      +schema: intermediate
+    marts:
+      +materialized: table
+      +schema: marts
+
+# No packages.yml. dbt_utils would be the obvious addition, but nothing here needs it: the date
+# spine comes from the dispatch macros inherited in Phase 0, and surrogate keys are not used
+# because every grain has a natural key. Skipping it keeps `dbt build` offline, so CI does not
+# need a `dbt deps` step or a network call to the package hub.
