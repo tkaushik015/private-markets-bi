@@ -14,6 +14,7 @@ from __future__ import annotations
 import datetime as dt
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 import yaml
@@ -32,7 +33,9 @@ from lp_lens.generate import (
     write_dataset,
 )
 from lp_lens.generate.__main__ import main as generate_cli
+from lp_lens.generate.entities import build_funds, build_managers
 from lp_lens.generate.market import daily_dates
+from lp_lens.generate.streams import make_streams
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CONFIG_PATH = REPO_ROOT / "configs" / "generator.yaml"
@@ -354,13 +357,16 @@ def test_outcomes_span_loss_making_to_strong(fund_performance: pd.DataFrame) -> 
 
 
 def test_strategy_dispersion_is_ordered_as_configured(config: GeneratorConfig, fund_performance: pd.DataFrame) -> None:
-    """Venture is configured with the widest terminal-TVPI sd and private credit the narrowest, so
-    the realised spread should reflect that ordering."""
+    """The most and least dispersed strategies in the config should be the most and least
+    dispersed in the realised data too. Read off the config rather than hard-coded, so
+    recalibrating the strategies cannot leave this test asserting a stale ordering."""
+    sds = {name: params.tvpi_log_sd for name, params in config.funds.strategies.items()}
+    widest, narrowest = max(sds, key=sds.__getitem__), min(sds, key=sds.__getitem__)
     spread = fund_performance.groupby("strategy").tvpi.agg(lambda s: s.max() - s.min())
-    assert spread.get("Venture", 0.0) > spread.get("Private Credit", 0.0), (
-        f"venture spread {spread.get('Venture')} did not exceed private credit {spread.get('Private Credit')}"
+    assert spread[widest] > spread[narrowest], (
+        f"{widest} (configured sd {sds[widest]}) realised a spread of {spread[widest]:.2f}, "
+        f"not wider than {narrowest} (sd {sds[narrowest]}) at {spread[narrowest]:.2f}"
     )
-    _ = config  # the ordering being asserted comes from the shipped config's sd values
 
 
 def test_j_curve_starts_below_one_and_recovers(fund_performance: pd.DataFrame) -> None:
@@ -394,6 +400,113 @@ def test_capital_calls_are_front_loaded(dataset: dict[str, pd.DataFrame]) -> Non
     years_in = calls.flow_date.map(lambda d: d.year) - calls.vintage_year
     early_share = calls.amount[years_in <= 2].sum() / calls.amount.sum()
     assert early_share > 0.5, f"only {early_share:.0%} of called capital lands in the first three years"
+
+
+# --------------------------------------------------------------------------------------------
+# Per-strategy terminal outcome distributions
+# --------------------------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="session")
+def modelled_terminal_tvpi(config: GeneratorConfig) -> pd.DataFrame:
+    """Terminal TVPI per fund, read off the generator's own model.
+
+    This is the one place the tests reach into the entity builders rather than the published
+    output, and it needs justifying. `terminal_tvpi` is deliberately absent from the Parquet, and
+    for a fund still mid-life there is no observable in the output that stands in for its terminal
+    multiple -- realised TVPI at the as-of date is a function of fund age as much as of fund
+    quality. Since the claim under test is about the configured outcome distribution itself, the
+    model is the right thing to measure.
+
+    `test_liquidated_funds_realise_their_modelled_terminal_tvpi` is what makes this legitimate: it
+    shows that wherever the output *can* be compared, it agrees with the model.
+    """
+    streams = make_streams(config.seed)
+    managers = build_managers(config, streams["managers"])
+    funds = build_funds(config, managers, streams["funds"])
+    return pd.DataFrame(
+        [
+            {
+                "fund_id": fund.fund_id,
+                "strategy": fund.strategy,
+                "terminal_tvpi": fund.terminal_tvpi,
+                "liquidated": fund.liquidation_date <= config.as_of_date,
+            }
+            for fund in funds
+        ]
+    )
+
+
+def test_liquidated_funds_realise_their_modelled_terminal_tvpi(
+    modelled_terminal_tvpi: pd.DataFrame, fund_performance: pd.DataFrame
+) -> None:
+    """For a fully liquidated fund, realised TVPI must equal the modelled terminal multiple.
+
+    Nothing is left to value, so distributions over paid-in is the final answer, and it should
+    close on the number the model drew. This is both a check that the lifecycle arithmetic closes
+    and the warrant for using modelled terminal TVPI in the tests below.
+    """
+    joined = modelled_terminal_tvpi.set_index("fund_id").join(fund_performance[["tvpi"]], how="inner")
+    liquidated = joined[joined.liquidated]
+    assert not liquidated.empty, "no liquidated fund carries commitments, so this proves nothing"
+    error = ((liquidated.tvpi - liquidated.terminal_tvpi) / liquidated.terminal_tvpi).abs()
+    assert error.max() < 1e-6, (
+        f"realised TVPI diverged from the model by up to {error.max():.2e} across {len(liquidated)} liquidated funds"
+    )
+
+
+def test_every_strategy_is_centred_above_break_even(modelled_terminal_tvpi: pd.DataFrame) -> None:
+    """Each strategy's median terminal TVPI must exceed 1.0x.
+
+    A strategy centred at break-even makes its whole cohort indistinguishable from a fund that
+    merely returned capital, which leaves the downstream metrics nothing to separate.
+    """
+    medians = modelled_terminal_tvpi.groupby("strategy").terminal_tvpi.median()
+    assert len(medians) == len(set(modelled_terminal_tvpi.strategy)), "a strategy vanished"
+    below = medians[medians <= 1.0]
+    assert below.empty, f"strategies centred at or below break-even: {below.round(3).to_dict()}"
+
+
+def test_venture_has_the_widest_terminal_spread(config: GeneratorConfig, modelled_terminal_tvpi: pd.DataFrame) -> None:
+    """Venture must be the most dispersed strategy in the drawn data, not just in the config.
+
+    Dispersion is measured as the sample standard deviation of log terminal TVPI, which estimates
+    the configured `tvpi_log_sd` directly and is comparable across strategies with different fund
+    counts. A raw max-minus-min range would not be: it grows with sample size, so the 22 buyout
+    funds would be flattered against the 4 infrastructure ones.
+    """
+    log_sd = modelled_terminal_tvpi.groupby("strategy").terminal_tvpi.agg(lambda s: float(np.log(s).std(ddof=1)))
+    widest = log_sd.idxmax()
+    assert widest == "Venture", f"{widest} dispersed more than venture: {log_sd.round(3).to_dict()}"
+    assert log_sd["Venture"] == pytest.approx(config.funds.strategies["Venture"].tvpi_log_sd, abs=0.35), (
+        f"venture's drawn dispersion {log_sd['Venture']:.3f} is far from its configured sd"
+    )
+
+
+def test_credit_and_infrastructure_are_the_narrowest_and_stay_above_break_even(
+    modelled_terminal_tvpi: pd.DataFrame,
+) -> None:
+    """The two deliberately tight strategies should be the two least dispersed, and tight enough
+    around a positive centre that no fund in either lands below break-even. That combination --
+    narrow band and positive centre together -- is the point of how they are calibrated."""
+    log_sd = modelled_terminal_tvpi.groupby("strategy").terminal_tvpi.agg(lambda s: float(np.log(s).std(ddof=1)))
+    narrowest_two = set(log_sd.nsmallest(2).index)
+    assert narrowest_two == {"Private Credit", "Infrastructure"}, (
+        f"expected credit and infrastructure to be the tightest, got {sorted(narrowest_two)}: "
+        f"{log_sd.round(3).to_dict()}"
+    )
+
+    tight = modelled_terminal_tvpi[modelled_terminal_tvpi.strategy.isin({"Private Credit", "Infrastructure"})]
+    below = tight[tight.terminal_tvpi < 1.0]
+    assert below.empty, f"{len(below)} credit/infrastructure funds are modelled below break-even"
+
+
+def test_wide_strategies_still_carry_a_loss_making_tail(modelled_terminal_tvpi: pd.DataFrame) -> None:
+    """Raising every strategy's centre above 1.0x must not remove the downside from the book.
+    The dispersed strategies are where it has to live."""
+    wide = modelled_terminal_tvpi[modelled_terminal_tvpi.strategy.isin({"Venture", "Growth", "Buyout"})]
+    assert (wide.terminal_tvpi < 1.0).any(), "no fund in the dispersed strategies is modelled below 1.0x"
+    assert (modelled_terminal_tvpi.terminal_tvpi > 3.0).any(), "no fund is modelled above 3.0x"
 
 
 # --------------------------------------------------------------------------------------------

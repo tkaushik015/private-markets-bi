@@ -25,44 +25,64 @@ funds:
   geography_focus: [North America, Europe, Asia-Pacific, Global, Emerging Markets]
   size_range_musd: [150.0, 4000.0]
 
-  # Terminal TVPI is exp(Normal(tvpi_log_mean, tvpi_log_sd)). exp(0.55) = 1.73, so buyout's median
-  # fund returns 1.73x. The sd is what spreads outcomes from loss-making to top-quartile: venture
-  # at 0.70 puts roughly one fund in six below 1.0x and one in six above 3.5x, while private
-  # credit at 0.15 keeps nearly every fund in a narrow band, which is the point of the asset class.
+  # Terminal TVPI at liquidation is drawn as exp(Normal(tvpi_log_mean, tvpi_log_sd)), so
+  # exp(tvpi_log_mean) is the median multiple and tvpi_log_sd sets the dispersion.
+  #
+  # These are invented assumptions chosen to give the synthetic book a usable shape. They are not
+  # calibrated to, and make no claim about, any real fund, index or industry data set.
+  #
+  # Two properties are deliberate and are asserted in tests/test_generator.py:
+  #
+  #   1. Every strategy is centred above 1.0x. A strategy centred at break-even would make its
+  #      whole cohort indistinguishable from a fund that had merely returned capital, which leaves
+  #      the downstream metrics nothing to separate.
+  #   2. Dispersion is ordered, widest to narrowest:
+  #        Venture 0.72 > Growth 0.45 > Buyout 0.34 > Real Estate 0.28
+  #                > Secondaries 0.18 > Infrastructure 0.16 > Private Credit 0.14
+  #      Venture's 0.72 opens a wide fan, putting a real loss-making tail and a real 4x-plus tail
+  #      in the same cohort. Private credit and infrastructure are the tight ones: at 0.14 and
+  #      0.16 around a median comfortably above 1.0x, essentially none of their funds land below
+  #      break-even, so a narrow band and a positive centre hold at the same time.
+  #
+  # Note that a strategy's *realised* TVPI at the as-of date is a different thing from the
+  # terminal figure set here, and will sit well below it for any cohort that is still mid-life.
+  # Infrastructure is the clearest case: its 11-14 year lives mean its funds are only about
+  # halfway through, so it reads near break-even at the as-of date while being centred at 1.50x
+  # terminal. That is the J-curve, not the calibration.
   strategies:
     Buyout:
       weight: 0.28
-      tvpi_log_mean: 0.55
-      tvpi_log_sd: 0.32
+      tvpi_log_mean: 0.588 # median 1.80x
+      tvpi_log_sd: 0.34
       life_years_range: [10, 13]
     Venture:
       weight: 0.18
-      tvpi_log_mean: 0.50
-      tvpi_log_sd: 0.70
+      tvpi_log_mean: 0.615 # median 1.85x
+      tvpi_log_sd: 0.72 # widest by design
       life_years_range: [11, 14]
     Growth:
       weight: 0.14
-      tvpi_log_mean: 0.48
-      tvpi_log_sd: 0.42
+      tvpi_log_mean: 0.560 # median 1.75x
+      tvpi_log_sd: 0.45
       life_years_range: [10, 13]
     Private Credit:
       weight: 0.14
-      tvpi_log_mean: 0.30
-      tvpi_log_sd: 0.15
+      tvpi_log_mean: 0.336 # median 1.40x
+      tvpi_log_sd: 0.14 # narrowest by design
       life_years_range: [7, 10]
     Real Estate:
       weight: 0.10
-      tvpi_log_mean: 0.36
-      tvpi_log_sd: 0.30
+      tvpi_log_mean: 0.438 # median 1.55x
+      tvpi_log_sd: 0.28
       life_years_range: [9, 12]
     Infrastructure:
       weight: 0.10
-      tvpi_log_mean: 0.34
-      tvpi_log_sd: 0.20
+      tvpi_log_mean: 0.405 # median 1.50x
+      tvpi_log_sd: 0.16 # second narrowest by design
       life_years_range: [11, 14]
     Secondaries:
       weight: 0.06
-      tvpi_log_mean: 0.32
+      tvpi_log_mean: 0.372 # median 1.45x
       tvpi_log_sd: 0.18
       life_years_range: [7, 10]
 

@@ -90,8 +90,8 @@ early in a schedule that was drawn in full.
 
 **Capital calls** land in the first five years, placed by a `Beta(1.6, 2.4)` draw over the window,
 which clusters them early. Their sizes carry a tilt that falls with time, so the first calls are
-the largest. Measured on the shipped config, 66% of called capital lands within three years of the
-vintage.
+the largest. Measured on the shipped config and seed, 80% of called capital lands within three
+years of the vintage.
 
 **Management fees** fall on commitment anniversaries, 2% of commitment a year for up to ten years.
 They compete with calls for the same envelope: total paid-in is drawn as 80–98% of commitment, and
@@ -123,29 +123,73 @@ what produces the early phase where paid-in exceeds value — fees are drawn bef
 accrues. At liquidation the identity closes: distributions have reached `TVPI × paid-in`, the
 multiple has reached `TVPI`, and NAV is zero.
 
-Terminal TVPI is drawn per fund as `exp(Normal(mean, sd))`, with the mean and sd set per strategy.
-The sd is what creates the spread from loss-making to top-quartile, and it is set deliberately
-differently by strategy: venture at 0.70 produces a wide fan of outcomes, private credit at 0.15
-keeps nearly every fund in a narrow band. Every investor in the same fund sees the same multiple,
-scaled by their own paid-in, because fund performance is a property of the fund.
+Every investor in the same fund sees the same multiple, scaled by their own paid-in, because fund
+performance is a property of the fund, not of the position.
 
-Measured on the shipped config and seed, realised TVPI at the as-of date:
+## Per-strategy outcome assumptions
 
-| Strategy | Funds | Min | Median | Max |
+Terminal TVPI at liquidation is drawn per fund as `exp(Normal(tvpi_log_mean, tvpi_log_sd))`, so
+`exp(tvpi_log_mean)` is the median multiple and `tvpi_log_sd` sets the dispersion.
+
+**These are invented assumptions, chosen to give the synthetic book a usable shape. They are not
+calibrated to, and make no claim about, any real fund, index or industry data set.** Nothing here
+should be read as a benchmark.
+
+| Strategy | `tvpi_log_mean` | Median | `tvpi_log_sd` | Intent |
 |---|---|---|---|---|
-| Buyout | 22 | 0.82 | 1.49 | 3.56 |
-| Venture | 8 | 0.47 | 1.36 | 2.99 |
-| Growth | 8 | 0.81 | 1.34 | 3.15 |
-| Real Estate | 5 | 0.82 | 1.53 | 2.61 |
-| Private Credit | 5 | 0.87 | 1.20 | 1.41 |
-| Secondaries | 7 | 0.95 | 1.11 | 1.78 |
-| Infrastructure | 4 | 0.96 | 1.03 | 1.06 |
+| Venture | 0.615 | 1.85x | **0.72** | widest: a real loss-making tail and a real 4x-plus tail in one cohort |
+| Growth | 0.560 | 1.75x | 0.45 | wide, but less so than venture |
+| Buyout | 0.588 | 1.80x | 0.34 | moderate dispersion around a solid centre |
+| Real Estate | 0.438 | 1.55x | 0.28 | moderate |
+| Secondaries | 0.372 | 1.45x | 0.18 | tight, the diversification is priced in |
+| Infrastructure | 0.405 | 1.50x | 0.16 | second narrowest |
+| Private Credit | 0.336 | 1.40x | **0.14** | narrowest: contractual, so little to disperse |
 
-16 of 60 funds sit below 1.0x and 12 above 2.0x. 24 are fully liquidated, and for those TVPI
-equals DPI by definition, since there is no residual value left to carry.
+Two properties are deliberate, and both are asserted in
+[`tests/test_generator.py`](../../../tests/test_generator.py) rather than left to inspection:
 
-Median TVPI by vintage traces the J-curve across the book: 0.85 for 2024, 0.95 for 2023, 1.15 for
-2021, and 1.8–2.6 for 2012–2016.
+1. **Every strategy is centred above 1.0x.** A strategy centred at break-even makes its whole
+   cohort indistinguishable from a fund that merely returned capital, which leaves the downstream
+   metrics nothing to separate.
+2. **Dispersion is ordered**, venture widest through private credit narrowest. Credit and
+   infrastructure are tight enough around a positive centre that no fund in either is modelled
+   below break-even — a narrow band and a positive centre at the same time, which is the point of
+   how those two are calibrated. The downside in the book lives in the dispersed strategies.
+
+### Modelled terminal vs realised at the as-of date
+
+These are different quantities and it is worth being explicit, because the second is easy to
+mistake for the first.
+
+| Strategy | Funds | Modelled terminal TVPI (min / median / max) | Realised at as-of (min / median / max) |
+|---|---|---|---|
+| Buyout | 22 | 0.92 / 2.16 / 3.87 | 0.82 / 1.54 / 3.87 |
+| Venture | 8 | 0.45 / 2.44 / 5.19 | 0.50 / 1.48 / 3.42 |
+| Growth | 8 | 0.86 / 3.16 / 4.03 | 0.81 / 1.44 / 3.59 |
+| Real Estate | 6 | 0.92 / 1.43 / 2.71 | 0.92 / 1.65 / 2.71 |
+| Secondaries | 7 | 1.00 / 1.38 / 1.87 | 0.97 / 1.15 / 1.87 |
+| Infrastructure | 4 | 1.21 / 1.33 / 1.56 | 1.02 / 1.07 / 1.20 |
+| Private Credit | 5 | 1.21 / 1.31 / 1.47 | 0.88 / 1.24 / 1.46 |
+
+Realised sits below terminal for any cohort still mid-life, because a fund part-way up the J-curve
+has not yet earned its multiple. **Infrastructure is the clearest case:** its 11–14 year lives mean
+none of its four funds has liquidated and the median is only about halfway through its life, so it
+reads near break-even at the as-of date while being modelled at 1.33x terminal. That gap is the
+J-curve, not the calibration — and it is why the tests assert the property on the modelled
+distribution, where fund age cannot confound it.
+
+Wherever the two *can* be compared they agree: for a fully liquidated fund nothing is left to
+value, so realised TVPI is the final answer, and it matches the modelled terminal multiple to
+within 3.4e-09 relative error across all 22 liquidated funds that carry commitments. That
+agreement is what makes the modelled figure a legitimate stand-in for funds still running.
+
+On the realised side, 15 of 59 funds with commitments sit below 1.0x and 15 above 2.0x. 24 are
+fully liquidated, and for those TVPI equals DPI by definition, since no residual value remains.
+One fund, `FUND0007`, drew no commitments from this 12-investor universe and so has no realised
+figure at all.
+
+Median realised TVPI by vintage traces the J-curve across the book: 0.85 for 2024, 0.97 for 2023,
+1.20 for 2021, 1.49 for 2017, and 1.84–2.87 for 2012–2016.
 
 ## Reference series
 
@@ -178,6 +222,13 @@ These hold in the generator and each is asserted separately in
 - no NAV before the first capital call, and none after liquidation — a series that ends before the
   as-of quarter must end at zero
 - FX covers every date carrying a EUR flow or NAV
+- every strategy's median modelled terminal TVPI is above 1.0x
+- venture is the most dispersed strategy, and credit and infrastructure the two least, measured as
+  the sample standard deviation of log terminal TVPI — scale-free, so a strategy with 22 funds is
+  not flattered against one with 4
+- the dispersed strategies still carry a loss-making tail, so raising every centre above 1.0x did
+  not remove the downside from the book
+- a fully liquidated fund's realised TVPI equals its modelled terminal multiple
 
 The paid-in cap is enforced by a runtime clip in `_apply_paid_in_cap`, not left to the draw. The
 configured paid-in fraction is capped at 1.0 so the clip should never bind, but an invariant that
