@@ -1,0 +1,18 @@
+# Provisional. The dbt project does not exist yet, so the dbt templater has nothing to compile
+# against and would fail on import. Phase 2.3 switches templater to "dbt" once warehouse/ holds a
+# real project, and tightens the rule set. Until then this exists so the pre-commit sqlfluff hook
+# has a dialect to work with rather than silently falling back to ANSI.
+[sqlfluff]
+dialect = snowflake
+templater = jinja
+max_line_length = 120
+
+[sqlfluff:indentation]
+tab_space_size = 4
+indented_joins = false
+
+[sqlfluff:rules:capitalisation.keywords]
+capitalisation_policy = lower
+
+[sqlfluff:rules:capitalisation.functions]
+extended_capitalisation_policy = lower

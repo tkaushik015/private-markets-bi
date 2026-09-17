@@ -1,0 +1,31 @@
+# Local gate that mirrors what PR CI enforces, so a failure shows up before the push
+# rather than after. Install once with: pre-commit install
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+        # TMDL is indentation-significant and Power BI Desktop rewrites these files on save;
+        # stripping whitespace here would fight the tool and produce noisy diffs.
+        exclude: '\.tmdl$'
+      - id: end-of-file-fixer
+        exclude: '\.tmdl$'
+      - id: check-yaml
+      - id: check-added-large-files
+        args: [--maxkb=5120]
+      - id: detect-private-key
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.8
+    hooks:
+      - id: ruff-check
+        args: [--fix]
+      - id: ruff-format
+
+  - repo: https://github.com/sqlfluff/sqlfluff
+    rev: 4.3.0
+    hooks:
+      - id: sqlfluff-lint
+        # Models only. Macro files are pure Jinja control flow with no parseable SQL of their
+        # own, so linting them produces noise rather than signal.
+        files: ^warehouse/models/.*\.sql$
