@@ -8,8 +8,8 @@ from a local internal stage rather than a data lake, and the private key path is
 Locally the values come from a git-ignored .env.snowflake.local passed with --env-file; the
 repository holds no account identifier and no private key.
 
-The object-name defaults below mirror the objects created by infra/snowflake/setup.sql. Change one,
-change both.
+The object-name defaults below mirror the objects Phase 3 creates in infra/snowflake/setup.sql.
+Change one, change both.
 """
 
 from __future__ import annotations
@@ -18,10 +18,10 @@ import os
 import re
 from pathlib import Path
 
-DEFAULT_USER = "PM_BI_SVC"
-DEFAULT_ROLE = "PM_BI_REPORTER"
-DEFAULT_WAREHOUSE = "PM_BI_WH_REPORTING"
-DEFAULT_DATABASE = "PM_BI_DEV"
+DEFAULT_USER = "LP_LENS_SVC"
+DEFAULT_ROLE = "LP_LENS_REPORTER"
+DEFAULT_WAREHOUSE = "LP_LENS_WH_REPORTING"
+DEFAULT_DATABASE = "LP_LENS_DEV"
 
 
 def read_env_file(path: Path) -> None:

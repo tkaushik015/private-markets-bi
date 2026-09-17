@@ -3,15 +3,15 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "private-markets-bi"
+name = "lp-lens"
 version = "0.1.0"
-description = "Private markets BI platform: synthetic fund data -> Snowflake -> dbt marts -> Power BI semantic model + Streamlit dashboard"
+description = "LP Lens: private markets fund performance analytics - synthetic fund data -> Snowflake -> dbt marts -> Power BI semantic model + Streamlit dashboard"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "Tushar Kaushik" }]
 
-# Core: imported directly by src/pm_bi. Metric math lives here, so these are not optional --
+# Core: imported directly by src/lp_lens. Metric math lives here, so these are not optional --
 # the dbt marts and the dashboards both have to agree with this code, and the reconciliation
 # tests compare them.
 dependencies = [
@@ -19,7 +19,7 @@ dependencies = [
     "pandas>=2.2",            # dataframes for the generator and the query layer
     "pyarrow>=16.0",          # Parquet read/write for data/raw
     "scipy>=1.12",            # Brent fallback for the IRR solver when Newton fails to converge
-    "pydantic>=2.5,<3",       # typed generator config (configs/generator.yaml)
+    "pydantic>=2.5,<3",       # typed generator config
     "pyyaml>=6.0",            # reads the generator config and the dbt YAML docs
     "duckdb>=1.1,<2",         # local warehouse engine, and the query layer's default source
 ]

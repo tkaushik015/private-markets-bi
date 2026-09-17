@@ -23,23 +23,21 @@ logs/
 # Power BI local state
 # ----------------------------------------------------------------------
 # Power BI Desktop writes these next to the PBIP. They are machine-local cache and
-# per-user settings, not part of the artifact.
-.pbi/localSettings.json
-cache.abf
+# per-user settings, not part of the artifact. Both patterns need the leading **/ because
+# they live inside the .SemanticModel and .Report folders, not at the repository root.
+# .pbi/editorSettings.json is deliberately not ignored: it is a shared project setting.
+**/.pbi/localSettings.json
+**/cache.abf
 
 # ----------------------------------------------------------------------
-# Generated data
+# Generated data and local warehouses
 # ----------------------------------------------------------------------
-# The generator is seeded and deterministic, so raw Parquet and the local warehouse
-# are always reproducible from source and do not belong in git.
+# The generator is seeded and deterministic, so raw Parquet and any DuckDB file built
+# from it are reproducible from source and do not belong in git.
 data/raw/
 data/warehouse/
-#
-# Exception: the published DuckDB file under data/published/ IS committed. Streamlit
-# Community Cloud has no warehouse to reach, so the public deployment reads a
-# snapshot from the repository. It holds synthetic data only.
-!data/published/
-!data/published/**
+*.duckdb
+*.duckdb.wal
 
 # ----------------------------------------------------------------------
 # Python

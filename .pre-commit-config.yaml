@@ -11,6 +11,7 @@ repos:
       - id: end-of-file-fixer
         exclude: '\.tmdl$'
       - id: check-yaml
+      - id: check-json
       - id: check-added-large-files
         args: [--maxkb=5120]
       - id: detect-private-key

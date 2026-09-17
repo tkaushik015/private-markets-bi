@@ -1,4 +1,4 @@
-"""Private markets BI platform.
+"""LP Lens: private markets fund performance analytics.
 
 Metric definitions live here and in the dbt models, and the two are held to agreement by
 reconciliation tests. Nothing in the dashboards recomputes a metric.

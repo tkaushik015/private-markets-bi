@@ -1,12 +1,14 @@
-"""Cell-by-cell reconciliation of the marts layer between DuckDB and Snowflake.
+"""Cell-by-cell reconciliation of one schema between DuckDB and Snowflake.
 
 Adapted from C0k11/quantai infra/snowflake/reconcile.py (MIT). Docstring and comments translated
-from Chinese, query tag renamed, file reformatted by ruff. The comparison arithmetic is unchanged;
-the only behavioural edit is that the two zips now state strict= explicitly, which tightens the
-per-cell zip to raise on a length mismatch that the column check upstream of it already rules out.
+from Chinese, query tag renamed, file reformatted by ruff. The comparison arithmetic is unchanged.
+Two behavioural edits: the schema is a --schema argument rather than a hard-coded "marts", so the
+script is not tied to a mart set that does not exist yet; and the two zips now state strict=
+explicitly, which tightens the per-cell zip to raise on a length mismatch that the column check
+upstream of it already rules out.
 
-One raw snapshot, one dbt project, two engines: every marts table must match on name, columns, row
-count and values. Two layers of comparison:
+One raw snapshot, one dbt project, two engines: every table in the schema must match on name,
+columns, row count and values. Two layers of comparison:
 
 1. Column fingerprints: each column's values sorted and digested (numbers first rounded to 9
    significant digits), which shows at a glance which column disagrees.
@@ -20,7 +22,7 @@ where the 9-significant-digit rounding fell is reported separately and does not 
 difference.
 
 Usage:
-    python infra/snowflake/reconcile.py --duckdb <path/to/pm_bi.duckdb> --env-file .env.snowflake.local
+    python infra/snowflake/reconcile.py --duckdb <path/to/lp_lens.duckdb> --env-file .env.snowflake.local
 
 Exit code: 0 if everything matches, 1 if anything differs.
 """
@@ -150,7 +152,7 @@ def compare_table(name: str, duck_cols, duck_rows, snow_cols, snow_rows) -> dict
     return res
 
 
-def duckdb_marts(path: Path) -> dict:
+def duckdb_tables(path: Path, schema: str) -> dict:
     import duckdb
 
     con = duckdb.connect(str(path), read_only=True)
@@ -158,27 +160,28 @@ def duckdb_marts(path: Path) -> dict:
         names = [
             r[0]
             for r in con.execute(
-                "SELECT table_name FROM information_schema.tables WHERE table_schema = 'marts' ORDER BY 1"
+                "SELECT table_name FROM information_schema.tables WHERE table_schema = ? ORDER BY 1",
+                [schema],
             ).fetchall()
         ]
         out = {}
         for n in names:
-            cur = con.execute(f"SELECT * FROM marts.{n}")
+            cur = con.execute(f"SELECT * FROM {schema}.{n}")
             out[n.lower()] = ([c[0] for c in cur.description], cur.fetchall())
         return out
     finally:
         con.close()
 
 
-def snowflake_marts() -> dict:
-    con = sfconn.connect("pm-bi-reconcile")
+def snowflake_tables(schema: str) -> dict:
+    con = sfconn.connect("lp-lens-reconcile")
     try:
         cur = con.cursor()
-        cur.execute("SHOW TABLES IN SCHEMA marts")
+        cur.execute(f"SHOW TABLES IN SCHEMA {schema}")
         names = sorted(r[1] for r in cur.fetchall())
         out = {}
         for n in names:
-            cur.execute(f"SELECT * FROM marts.{n}")
+            cur.execute(f"SELECT * FROM {schema}.{n}")
             out[n.lower()] = ([c[0] for c in cur.description], cur.fetchall())
         return out
     finally:
@@ -188,14 +191,15 @@ def snowflake_marts() -> dict:
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--duckdb", type=Path, required=True, help="DuckDB file built from the same raw snapshot")
+    p.add_argument("--schema", default="marts", help="schema to reconcile on both engines (default: marts)")
     p.add_argument("--env-file", type=Path, help="KEY=VALUE file, e.g. .env.snowflake.local")
     args = p.parse_args(argv)
     if args.env_file:
         sfconn.read_env_file(args.env_file)
 
-    duck = duckdb_marts(args.duckdb)
+    duck = duckdb_tables(args.duckdb, args.schema)
     try:
-        snow = snowflake_marts()
+        snow = snowflake_tables(args.schema)
     except Exception as exc:
         # Broad on purpose: driver errors can echo the account identifier and key path, so every
         # failure mode has to reach the user masked. "from None" drops the original traceback,
@@ -223,8 +227,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"        {prob}")
         failed += bool(r["problems"])
     print(
-        f"[reconcile] {len(set(duck) & set(snow))} tables, {total_rows} rows, {total_cols} columns; "
-        f"{'all equal' if not failed else f'{failed} with differences'}"
+        f"[reconcile] schema {args.schema}: {len(set(duck) & set(snow))} tables, {total_rows} rows, "
+        f"{total_cols} columns; {'all equal' if not failed else f'{failed} with differences'}"
     )
     return 0 if not failed else 1
 

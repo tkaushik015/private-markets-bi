@@ -1,5 +1,5 @@
 ---
-description: Core engineering rules for the private markets BI platform
+description: Core engineering rules for LP Lens, the private markets fund performance analytics platform
 alwaysApply: true
 ---
 
@@ -40,3 +40,8 @@ alwaysApply: true
   phase.
 - When unsure about existing behaviour, read the code and `docs/AUDIT.md` before changing
   anything.
+
+## Attribution
+
+- This repository started from a fork of another project. Anything adapted from it must keep its
+  "Adapted from" header and must be listed in `ATTRIBUTION.md` with the change described.
