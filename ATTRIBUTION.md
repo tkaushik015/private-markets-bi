@@ -62,9 +62,9 @@ verdict, is a deliberate choice worth keeping.
 
 ## Ideas and layouts adapted, with almost no code carried over
 
-These upstream ideas shape LP Lens. No lines were copied, with one exception: the three Power BI
-boilerplate files named in the PBIP layout row below. They are listed because the influence is real
-and should be acknowledged.
+These upstream ideas shape LP Lens. Within this section, no lines were copied, with one exception:
+the three Power BI boilerplate files named in the PBIP layout row below. They are listed because
+the influence is real and should be acknowledged.
 
 | Idea | Upstream source | How it was changed |
 |---|---|---|
