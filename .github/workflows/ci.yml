@@ -15,6 +15,13 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  # Every dbt and sqlfluff invocation runs from the repository root, and both resolve these paths
+  # relative to the working directory. Setting them once here keeps the steps below identical to
+  # what a developer runs locally.
+  LP_LENS_RAW_DIR: data/raw
+  LP_LENS_DB_PATH: data/warehouse/lp_lens.duckdb
+
 jobs:
   lint-and-test:
     runs-on: ubuntu-latest
@@ -27,13 +34,12 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
 
-      # Only the dev extra. sqlfluff has no dbt project to compile against yet and the Snowflake
-      # and app dependencies are not exercised by any test, so installing them would add minutes
-      # of CI time to check nothing. Phase 5 widens this as the phases that need it land.
+      # The warehouse extra is needed from Phase 2 on: dbt builds the marts, and sqlfluff's dbt
+      # templater imports the adapter in order to compile each model before linting it.
       - name: Install
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev]"
+          pip install -e ".[warehouse,dev]"
 
       - name: Ruff lint
         run: ruff check --output-format=github .
@@ -41,5 +47,20 @@ jobs:
       - name: Ruff format
         run: ruff format --check .
 
+      # The generator is seeded, so this produces the same Parquet every run. Nothing is committed;
+      # the warehouse is built from data generated in the job.
+      - name: Generate synthetic source data
+        run: python -m lp_lens.generate --config configs/generator.yaml --out "$LP_LENS_RAW_DIR"
+
+      - name: sqlfluff lint
+        run: sqlfluff lint warehouse/models
+
+      # Builds every model and runs every dbt test -- grain uniqueness, referential integrity,
+      # accepted values, the enforced contracts and the three custom generic tests.
+      - name: dbt build
+        run: dbt build --project-dir warehouse --profiles-dir warehouse --target local --no-partial-parse
+
+      # Runs after dbt so a dbt failure is reported as a dbt failure. The reconciliation tests
+      # build their own throwaway warehouse, so they do not depend on the step above having run.
       - name: Pytest
         run: pytest
