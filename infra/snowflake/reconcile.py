@@ -1,15 +1,32 @@
-"""DuckDB 与 Snowflake 的 marts 逐列对账。
+"""Cell-by-cell reconciliation of one schema between DuckDB and Snowflake.
 
-同一份 raw 快照、同一个 dbt 项目、两个引擎：每张 marts 表必须表名一致、列一致、行数一致、取值一致。比两层：
-1. 列指纹：每列取值排序后做摘要（数字先取 9 位有效数字），一眼看出哪一列不一致；
-2. 逐单元格：两边整行排序对齐后逐格比较。整数（含整值 Decimal）必须完全相等；
-   浮点用相对误差 1e-9，另有 1e-12 的绝对误差给接近 0 的值（两个引擎聚合顺序不同，末位可能不同）。
-判定以逐单元格为准；列指纹只因数字取整边界不同而不一致时单独标出，不算差异。
+Adapted from C0k11/quantai infra/snowflake/reconcile.py (MIT). Docstring and comments translated
+from Chinese, query tag renamed, file reformatted by ruff. The comparison arithmetic is unchanged.
+Two behavioural edits: the schema is a --schema argument rather than a hard-coded "marts", so the
+script is not tied to a mart set that does not exist yet; and the two zips now state strict=
+explicitly, which tightens the per-cell zip to raise on a length mismatch that the column check
+upstream of it already rules out.
 
-用法：
-    python infra/snowflake/reconcile.py --duckdb <path/to/quantai.duckdb> --env-file .env.snowflake.local
-退出码：0 全部一致，1 有差异。
+One raw snapshot, one dbt project, two engines: every table in the schema must match on name,
+columns, row count and values. Two layers of comparison:
+
+1. Column fingerprints: each column's values sorted and digested (numbers first rounded to 9
+   significant digits), which shows at a glance which column disagrees.
+2. Cell by cell: both sides sorted into the same row order, then compared position by position.
+   Integers (including integral Decimals) must be exactly equal. Floats use a relative tolerance of
+   1e-9, with an absolute 1e-12 for values near zero, because the two engines aggregate in different
+   orders and the last digit can differ.
+
+The verdict comes from the cell comparison. A column whose fingerprint differs only because of
+where the 9-significant-digit rounding fell is reported separately and does not count as a
+difference.
+
+Usage:
+    python infra/snowflake/reconcile.py --duckdb <path/to/lp_lens.duckdb> --env-file .env.snowflake.local
+
+Exit code: 0 if everything matches, 1 if anything differs.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -30,9 +47,11 @@ ABS_TOL = 1e-12
 
 
 def norm(v):
-    """两个驱动返回的 Python 值统一成可比较的形式。
+    """Normalise a value from either driver into a comparable form.
 
-    整数和整值 Decimal 保持 int（精确比较），其余数字变 float；日期、时间、布尔、字符串带类型前缀。
+    Integers and integral Decimals stay int so they compare exactly; other numbers become float.
+    Dates, timestamps, booleans and strings get a type prefix so a string never collides with a
+    date that happens to have the same text.
     """
     if v is None:
         return None
@@ -59,11 +78,12 @@ def _is_num(v) -> bool:
 
 
 def _sig(f: float) -> float:
-    return float(f"{f:.9g}") + 0.0  # + 0.0 把 -0.0 归成 0.0
+    return float(f"{f:.9g}") + 0.0  # the + 0.0 folds -0.0 into 0.0
 
 
 def _key(row: tuple) -> tuple:
-    # 整数按精确值排序，浮点按 9 位有效数字排序（末位差异不应改变行序）。
+    # Integers sort on their exact value, floats on 9 significant digits, so a last-digit
+    # difference between engines cannot reorder the rows and cause a spurious mismatch.
     return tuple(
         (0, 0) if v is None else (1, v) if isinstance(v, int) else (1, _sig(v)) if isinstance(v, float) else (2, v)
         for v in row
@@ -76,7 +96,7 @@ def fingerprint(values: list) -> str:
 
 
 def cells_equal(a, b) -> tuple[bool, float]:
-    """返回 (是否一致, 一致但不完全相等时的相对差)。整数对整数精确比较，涉及浮点才用容差。"""
+    """Return (equal, relative difference). Integers compare exactly; tolerance applies only to floats."""
     if isinstance(a, int) and isinstance(b, int):
         return a == b, 0.0
     if _is_num(a) and _is_num(b):
@@ -89,13 +109,20 @@ def cells_equal(a, b) -> tuple[bool, float]:
 
 
 def compare_table(name: str, duck_cols, duck_rows, snow_cols, snow_rows) -> dict:
-    res = {"table": name, "rows": (len(duck_rows), len(snow_rows)), "problems": [],
-           "fingerprints_equal": (0, 0), "columns_mismatched": [], "max_rel_diff": 0.0}
+    res = {
+        "table": name,
+        "rows": (len(duck_rows), len(snow_rows)),
+        "problems": [],
+        "fingerprints_equal": (0, 0),
+        "columns_mismatched": [],
+        "max_rel_diff": 0.0,
+    }
     dc = [c.lower() for c in duck_cols]
     sc = [c.lower() for c in snow_cols]
     if set(dc) != set(sc):
         res["problems"].append(
-            f"columns differ: only duckdb {sorted(set(dc) - set(sc))}, only snowflake {sorted(set(sc) - set(dc))}")
+            f"columns differ: only duckdb {sorted(set(dc) - set(sc))}, only snowflake {sorted(set(sc) - set(dc))}"
+        )
         return res
     order = [sc.index(c) for c in dc]
     d = [tuple(norm(v) for v in r) for r in duck_rows]
@@ -108,8 +135,11 @@ def compare_table(name: str, duck_cols, duck_rows, snow_cols, snow_rows) -> dict
     s.sort(key=_key)
     bad_cols: set[str] = set()
     bad_cells = 0
-    for rd, rs in zip(d, s):
-        for j, (a, b) in enumerate(zip(rd, rs)):
+    # strict=False on the rows: a row count mismatch is already recorded as a problem above, and
+    # comparing the overlap still shows which columns drifted. strict=True on the cells, because
+    # the column sets were proven equal above, so a length mismatch there would be a real bug.
+    for rd, rs in zip(d, s, strict=False):
+        for j, (a, b) in enumerate(zip(rd, rs, strict=True)):
             ok, rel = cells_equal(a, b)
             if not ok:
                 bad_cells += 1
@@ -122,31 +152,36 @@ def compare_table(name: str, duck_cols, duck_rows, snow_cols, snow_rows) -> dict
     return res
 
 
-def duckdb_marts(path: Path) -> dict:
+def duckdb_tables(path: Path, schema: str) -> dict:
     import duckdb
 
     con = duckdb.connect(str(path), read_only=True)
     try:
-        names = [r[0] for r in con.execute(
-            "SELECT table_name FROM information_schema.tables WHERE table_schema = 'marts' ORDER BY 1").fetchall()]
+        names = [
+            r[0]
+            for r in con.execute(
+                "SELECT table_name FROM information_schema.tables WHERE table_schema = ? ORDER BY 1",
+                [schema],
+            ).fetchall()
+        ]
         out = {}
         for n in names:
-            cur = con.execute(f"SELECT * FROM marts.{n}")
+            cur = con.execute(f"SELECT * FROM {schema}.{n}")
             out[n.lower()] = ([c[0] for c in cur.description], cur.fetchall())
         return out
     finally:
         con.close()
 
 
-def snowflake_marts() -> dict:
-    con = sfconn.connect("quantai-reconcile")
+def snowflake_tables(schema: str) -> dict:
+    con = sfconn.connect("lp-lens-reconcile")
     try:
         cur = con.cursor()
-        cur.execute("SHOW TABLES IN SCHEMA marts")
+        cur.execute(f"SHOW TABLES IN SCHEMA {schema}")
         names = sorted(r[1] for r in cur.fetchall())
         out = {}
         for n in names:
-            cur.execute(f"SELECT * FROM marts.{n}")
+            cur.execute(f"SELECT * FROM {schema}.{n}")
             out[n.lower()] = ([c[0] for c in cur.description], cur.fetchall())
         return out
     finally:
@@ -155,22 +190,28 @@ def snowflake_marts() -> dict:
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--duckdb", type=Path, required=True, help="与 raw/ 快照同一次 ETL 产出的 DuckDB 文件")
-    p.add_argument("--env-file", type=Path, help="KEY=VALUE 文件，如 .env.snowflake.local")
+    p.add_argument("--duckdb", type=Path, required=True, help="DuckDB file built from the same raw snapshot")
+    p.add_argument("--schema", default="marts", help="schema to reconcile on both engines (default: marts)")
+    p.add_argument("--env-file", type=Path, help="KEY=VALUE file, e.g. .env.snowflake.local")
     args = p.parse_args(argv)
     if args.env_file:
         sfconn.read_env_file(args.env_file)
 
-    duck = duckdb_marts(args.duckdb)
+    duck = duckdb_tables(args.duckdb, args.schema)
     try:
-        snow = snowflake_marts()
-    except Exception as exc:  # noqa: BLE001 - 报错信息打码后再抛
-        raise SystemExit(f"[reconcile] Snowflake 读取失败：{sfconn.mask(exc)}") from None
+        snow = snowflake_tables(args.schema)
+    except Exception as exc:
+        # Broad on purpose: driver errors can echo the account identifier and key path, so every
+        # failure mode has to reach the user masked. "from None" drops the original traceback,
+        # which would reprint the unmasked text.
+        raise SystemExit(f"[reconcile] could not read Snowflake: {sfconn.mask(exc)}") from None
 
     failed = 0
     if set(duck) != set(snow):
         failed += 1
-        print(f"[table set] only duckdb {sorted(set(duck) - set(snow))}, only snowflake {sorted(set(snow) - set(duck))}")
+        only_duck = sorted(set(duck) - set(snow))
+        only_snow = sorted(set(snow) - set(duck))
+        print(f"[table set] only duckdb {only_duck}, only snowflake {only_snow}")
     total_rows = total_cols = 0
     for name in sorted(set(duck) & set(snow)):
         r = compare_table(name, *duck[name], *snow[name])
@@ -178,13 +219,17 @@ def main(argv: list[str] | None = None) -> int:
         total_cols += r["fingerprints_equal"][1]
         fp_eq, fp_n = r["fingerprints_equal"]
         status = "OK  " if not r["problems"] else "DIFF"
-        print(f"[{status}] {name:<24} rows {r['rows'][0]:>7} / {r['rows'][1]:<7} "
-              f"column fingerprints {fp_eq}/{fp_n}  max float rel diff {r['max_rel_diff']:.1e}")
+        print(
+            f"[{status}] {name:<24} rows {r['rows'][0]:>7} / {r['rows'][1]:<7} "
+            f"column fingerprints {fp_eq}/{fp_n}  max float rel diff {r['max_rel_diff']:.1e}"
+        )
         for prob in r["problems"]:
             print(f"        {prob}")
         failed += bool(r["problems"])
-    print(f"[reconcile] {len(set(duck) & set(snow))} tables, {total_rows} rows, {total_cols} columns; "
-          f"{'all equal' if not failed else f'{failed} with differences'}")
+    print(
+        f"[reconcile] schema {args.schema}: {len(set(duck) & set(snow))} tables, {total_rows} rows, "
+        f"{total_cols} columns; {'all equal' if not failed else f'{failed} with differences'}"
+    )
     return 0 if not failed else 1
 
 

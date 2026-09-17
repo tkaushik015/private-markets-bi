@@ -1,6 +1,13 @@
 MIT License
 
 Copyright (c) 2025 QuantAI
+Copyright (c) 2026 Tushar Kaushik
+
+This project is derived in part from C0k11/quantai, Copyright (c) 2025 QuantAI,
+used under the MIT License. The original notice above is retained as that license
+requires. ATTRIBUTION.md names every file and pattern adapted from that project;
+the first commit on this repository's main branch is the upstream code unmodified,
+so a diff from it shows exactly which work is original to this project.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

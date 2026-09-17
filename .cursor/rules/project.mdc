@@ -1,0 +1,47 @@
+---
+description: Core engineering rules for LP Lens, the private markets fund performance analytics platform
+alwaysApply: true
+---
+
+# Project rules
+
+## Where logic lives
+
+- Business logic belongs in dbt models. DAX measures only aggregate or format dbt outputs.
+  Never recompute IRR, TVPI or PME in DAX. The Streamlit app holds no business logic either;
+  it reads marts.
+- Every metric formula must match the docs and must be covered by a Python reconciliation test.
+
+## Data honesty
+
+- Never fabricate data, metrics, benchmarks or screenshots. An unknown or uncomputable value is
+  NULL, not 0. An IRR that fails to converge returns None and surfaces as NULL — never a fake 0,
+  which would read as "broke even" rather than "could not be computed".
+- Report only numbers measured from a real run. If something was designed but not deployed, label
+  it "designed, not deployed".
+
+## Modelling standards
+
+- Every new mart needs four things: a declared grain, an enforced contract, uniqueness and
+  not-null tests on that grain, and YAML docs stating the formula in plain English, including the
+  net-vs-gross and as-of conventions.
+- Keep the DuckDB and Snowflake builds both passing. Use `adapter.dispatch` for dialect
+  differences rather than writing engine-specific SQL inline.
+
+## Security
+
+- All credentials come from environment variables. Never commit secrets, account identifiers or
+  `.env` files. Mask account identifiers and key paths in any error text that reaches stdout or a
+  CI log.
+
+## Workflow
+
+- Small commits with conventional commit messages. One feature per branch. Open a PR for each
+  phase.
+- When unsure about existing behaviour, read the code and `docs/AUDIT.md` before changing
+  anything.
+
+## Attribution
+
+- This repository started from a fork of another project. Anything adapted from it must keep its
+  "Adapted from" header and must be listed in `ATTRIBUTION.md` with the change described.

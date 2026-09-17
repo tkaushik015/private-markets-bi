@@ -1,12 +1,19 @@
 {#
-  DuckDB 与 Snowflake 写法不同的 SQL 片段，按 adapter 分派（adapter.dispatch）。
-  default__ 是 DuckDB 写法（本地和云上 Lambda 用），snowflake__ 是 Snowflake 写法。
-  Snowflake 写法都先在无仓库会话里用 EXPLAIN 编译通过，再由 dbt build 实跑验证。
+  SQL constructs that DuckDB and Snowflake spell differently, resolved per adapter
+  via adapter.dispatch. default__ is the DuckDB form (used by the local target);
+  snowflake__ is the Snowflake form.
+
+  Adapted from C0k11/quantai warehouse/macros/cross_db.sql (MIT). Comments
+  translated from Chinese; the dispatch namespace is lp_lens_warehouse, which must
+  stay equal to the dbt project name Phase 2 declares in dbt_project.yml. The
+  upstream file carried five macros; iso_day_of_week, year_month and
+  local_date_from_utc were dropped because private markets data has no trading
+  calendar and no intraday UTC timestamps to convert.
 #}
 
-{# 日历日序列：bounds_cte 里从 lo 到 hi（含两端）每天一行，列名 date。 #}
+{# Calendar-day series: one row per day from lo to hi inclusive, taken from bounds_cte, column named date. #}
 {% macro day_spine(bounds_cte, lo, hi) -%}
-    {{ return(adapter.dispatch('day_spine', 'quantai_warehouse')(bounds_cte, lo, hi)) }}
+    {{ return(adapter.dispatch('day_spine', 'lp_lens_warehouse')(bounds_cte, lo, hi)) }}
 {%- endmacro %}
 
 {% macro default__day_spine(bounds_cte, lo, hi) -%}
@@ -20,51 +27,19 @@
         lateral flatten(input => array_generate_range(0, datediff(day, b.{{ lo }}, b.{{ hi }}) + 1)) g
 {%- endmacro %}
 
-{# 年月字符串 'YYYY-MM'。 #}
-{% macro year_month(col) -%}
-    {{ return(adapter.dispatch('year_month', 'quantai_warehouse')(col)) }}
-{%- endmacro %}
-
-{% macro default__year_month(col) -%}
-    strftime({{ col }}, '%Y-%m')
-{%- endmacro %}
-
-{% macro snowflake__year_month(col) -%}
-    to_char({{ col }}, 'YYYY-MM')
-{%- endmacro %}
-
-{# ISO 星期几：1 是周一，7 是周日。 #}
-{% macro iso_day_of_week(col) -%}
-    {{ return(adapter.dispatch('iso_day_of_week', 'quantai_warehouse')(col)) }}
-{%- endmacro %}
-
-{% macro default__iso_day_of_week(col) -%}
-    extract(isodow from {{ col }})
-{%- endmacro %}
-
-{% macro snowflake__iso_day_of_week(col) -%}
-    dayofweekiso({{ col }})
-{%- endmacro %}
-
-{# UTC 墙钟时间戳（不带时区）换到某个时区的当地日期。两边都是：先当作 UTC，再换成当地时间，再取日期。 #}
-{% macro local_date_from_utc(col, tz) -%}
-    {{ return(adapter.dispatch('local_date_from_utc', 'quantai_warehouse')(col, tz)) }}
-{%- endmacro %}
-
-{% macro default__local_date_from_utc(col, tz) -%}
-    cast(timezone('{{ tz }}', timezone('UTC', {{ col }})) as date)
-{%- endmacro %}
-
-{% macro snowflake__local_date_from_utc(col, tz) -%}
-    cast(convert_timezone('UTC', '{{ tz }}', {{ col }}) as date)
-{%- endmacro %}
-
 {#
-  ASOF 左连接：左表每行取右表里 right_time <= left_time 的最近一行，找不到就补 NULL。
-  Snowflake 的 ASOF JOIN 没有匹配时本身就补 NULL（官方文档）；时间比较写在 MATCH_CONDITION，ON 只能写等值条件。
+  ASOF left join: for each left row take the nearest right row where right_time <= left_time,
+  NULL when there is no match.
+
+  Needed here because cash flows land on irregular dates but FX rates and NAV marks land on their
+  own schedule, so converting a flow means reaching for the most recent rate on or before it.
+
+  The two dialects put the time comparison in different places: DuckDB takes it in ON alongside the
+  equality, Snowflake requires it in MATCH_CONDITION and allows only equality conditions in ON.
+  Snowflake's ASOF JOIN already yields NULL on no match, so it needs no LEFT keyword.
 #}
 {% macro asof_left_join(relation, alias, equal_on, left_time, right_time) -%}
-    {{ return(adapter.dispatch('asof_left_join', 'quantai_warehouse')(relation, alias, equal_on, left_time, right_time)) }}
+    {{ return(adapter.dispatch('asof_left_join', 'lp_lens_warehouse')(relation, alias, equal_on, left_time, right_time)) }}
 {%- endmacro %}
 
 {% macro default__asof_left_join(relation, alias, equal_on, left_time, right_time) -%}

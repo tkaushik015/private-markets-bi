@@ -1,0 +1,3 @@
+# Intermediate layer, Phase 2: reusable joins and metric building blocks between staging and
+# marts. Upstream had no such layer. Placeholder so the layout is committed before any model
+# exists. Delete once populated.
