@@ -1,18 +1,47 @@
-# Provisional. The dbt project does not exist yet, so the dbt templater has nothing to compile
-# against and would fail on import. Phase 2 switches templater to "dbt" once warehouse/ holds a
-# real project, and tightens the rule set. Until then this exists so the pre-commit sqlfluff hook
-# has a dialect to work with rather than silently falling back to ANSI.
+# Lints the compiled SQL, not the Jinja source. Phase 0 used the jinja templater as a placeholder
+# because no dbt project existed; now that warehouse/ holds a real one, the dbt templater compiles
+# each model properly, so ref() and the dispatch macros resolve and the linter sees the SQL the
+# engine will actually run.
+#
+# Dialect is duckdb because that is what the compiled SQL targets: adapter.dispatch resolves to the
+# default__ macros on the local target. The Snowflake variants compile to different SQL and are
+# linted in Phase 3, when there is a Snowflake target to compile against.
 [sqlfluff]
-dialect = snowflake
-templater = jinja
+dialect = duckdb
+templater = dbt
 max_line_length = 120
+# Only models. Macro files are Jinja control flow with no parseable SQL of their own, and the
+# generic tests are Jinja templates whose SQL depends on the arguments they are called with.
+exclude_rules = structure.column_order, references.consistent
+
+[sqlfluff:templater:dbt]
+project_dir = warehouse
+profiles_dir = warehouse
+target = local
 
 [sqlfluff:indentation]
 tab_space_size = 4
 indented_joins = false
+indented_on_contents = false
+
+[sqlfluff:layout:type:comma]
+line_position = trailing
 
 [sqlfluff:rules:capitalisation.keywords]
 capitalisation_policy = lower
 
 [sqlfluff:rules:capitalisation.functions]
 extended_capitalisation_policy = lower
+
+[sqlfluff:rules:capitalisation.identifiers]
+extended_capitalisation_policy = lower
+
+[sqlfluff:rules:capitalisation.literals]
+capitalisation_policy = lower
+
+[sqlfluff:rules:capitalisation.types]
+extended_capitalisation_policy = lower
+
+# Every model selects explicit columns, and a bare * in a mart would break the enforced contracts.
+[sqlfluff:rules:ambiguous.column_references]
+group_by_and_order_by_style = explicit
