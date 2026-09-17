@@ -60,10 +60,11 @@ fingerprints alone would miss a single changed cell in a large column; comparing
 no signal about *which* column drifted. Doing both, and treating only the cell comparison as the
 verdict, is a deliberate choice worth keeping.
 
-## Ideas and layouts adapted, with no code carried over
+## Ideas and layouts adapted, with almost no code carried over
 
-These upstream ideas shape LP Lens, but no lines were copied. They are listed because the influence
-is real and should be acknowledged.
+These upstream ideas shape LP Lens. No lines were copied, with one exception: the three Power BI
+boilerplate files named in the PBIP layout row below. They are listed because the influence is real
+and should be acknowledged.
 
 | Idea | Upstream source | How it was changed |
 |---|---|---|
