@@ -1,0 +1,115 @@
+# Synthetic private markets data generator.
+#
+# All data produced from this file is fabricated. No manager, fund or investor named in the output
+# is a real entity, and no figure in it is a real reported number. See
+# src/lp_lens/generate/README.md for the entity definitions and the outcome model.
+#
+# One seed drives every draw. Same seed plus same config gives byte-identical Parquet; change the
+# seed and every table changes.
+seed: 20260630
+
+# Nothing is generated after this date. Funds whose life extends past it are still active and are
+# truncated here rather than being run to liquidation.
+as_of_date: 2026-06-30
+
+managers:
+  count: 25
+  hq_regions: [North America, Europe, Asia-Pacific, Middle East]
+  founded_year_range: [1985, 2015]
+
+funds:
+  count: 60
+  vintage_year_range: [2012, 2024]
+  # Share of funds denominated in EUR; the rest are USD.
+  eur_share: 0.30
+  geography_focus: [North America, Europe, Asia-Pacific, Global, Emerging Markets]
+  size_range_musd: [150.0, 4000.0]
+
+  # Terminal TVPI is exp(Normal(tvpi_log_mean, tvpi_log_sd)). exp(0.55) = 1.73, so buyout's median
+  # fund returns 1.73x. The sd is what spreads outcomes from loss-making to top-quartile: venture
+  # at 0.70 puts roughly one fund in six below 1.0x and one in six above 3.5x, while private
+  # credit at 0.15 keeps nearly every fund in a narrow band, which is the point of the asset class.
+  strategies:
+    Buyout:
+      weight: 0.28
+      tvpi_log_mean: 0.55
+      tvpi_log_sd: 0.32
+      life_years_range: [10, 13]
+    Venture:
+      weight: 0.18
+      tvpi_log_mean: 0.50
+      tvpi_log_sd: 0.70
+      life_years_range: [11, 14]
+    Growth:
+      weight: 0.14
+      tvpi_log_mean: 0.48
+      tvpi_log_sd: 0.42
+      life_years_range: [10, 13]
+    Private Credit:
+      weight: 0.14
+      tvpi_log_mean: 0.30
+      tvpi_log_sd: 0.15
+      life_years_range: [7, 10]
+    Real Estate:
+      weight: 0.10
+      tvpi_log_mean: 0.36
+      tvpi_log_sd: 0.30
+      life_years_range: [9, 12]
+    Infrastructure:
+      weight: 0.10
+      tvpi_log_mean: 0.34
+      tvpi_log_sd: 0.20
+      life_years_range: [11, 14]
+    Secondaries:
+      weight: 0.06
+      tvpi_log_mean: 0.32
+      tvpi_log_sd: 0.18
+      life_years_range: [7, 10]
+
+investors:
+  count: 12
+  types: [Pension, Endowment, Insurance, Family Office, Sovereign Wealth]
+
+commitments:
+  funds_per_investor_range: [8, 20]
+  # Commitment as a share of fund size. A 12-LP synthetic universe cannot fill a real fund, so
+  # these shares deliberately do not sum to 1 across the investors in any one fund.
+  fraction_of_fund_size_range: [0.01, 0.08]
+  # Days after 1 January of the vintage year that the commitment is signed, which is why no cash
+  # flow can precede it.
+  date_lag_days_range: [0, 365]
+
+cash_flows:
+  call_period_years: 5
+  calls_per_commitment_range: [5, 11]
+  # Beta(a, b) over the call window. a < b skews draws early, which front-loads the calls.
+  call_beta: [1.6, 2.4]
+  distribution_start_year: 4
+  distribution_end_year: 12
+  distributions_per_commitment_range: [4, 12]
+  # a > b skews draws late, which back-loads the distributions.
+  distribution_beta: [2.4, 1.6]
+  # Share of commitment ever drawn, counting management fees. Below 1.0 because almost no fund
+  # calls every euro of every commitment, and because paid-in above commitment is only legitimate
+  # against recallable distributions already received.
+  terminal_paid_in_fraction_range: [0.80, 0.98]
+  management_fee_rate: 0.02
+  management_fee_years: 10
+  recallable_share_range: [0.0, 0.15]
+
+nav:
+  initial_multiple: 0.95
+  trough_multiple: 0.80
+  trough_progress: 0.18
+  quarterly_noise_sd: 0.025
+
+market:
+  fx:
+    base_rate: 1.10
+    annual_vol: 0.08
+    mean_reversion: 0.004
+  index:
+    name: SYNTH_GLOBAL_EQUITY_TR
+    start_level: 100.0
+    annual_drift: 0.07
+    annual_vol: 0.16
