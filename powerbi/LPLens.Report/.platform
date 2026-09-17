@@ -1,0 +1,11 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/gitIntegration/platformProperties/2.0.0/schema.json",
+  "metadata": {
+    "type": "Report",
+    "displayName": "LPLens"
+  },
+  "config": {
+    "version": "2.0",
+    "logicalId": "c47b2e91-08d6-4a5f-b3c7-6e5d9a02f184"
+  }
+}
