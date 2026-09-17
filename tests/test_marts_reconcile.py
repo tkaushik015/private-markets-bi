@@ -458,6 +458,16 @@ def test_no_metric_is_a_fabricated_zero(marts: dict) -> None:
 # ------------------------------------------------------------------------------------------------
 
 
+def _perturb_middle_capital_call(raw_tables: dict[str, pd.DataFrame]) -> tuple[dict[str, pd.DataFrame], pd.Series]:
+    """Copy the raw tables and overstate one capital call by 10%. Deterministic, not random."""
+    raw = {name: frame.copy() for name, frame in raw_tables.items()}
+    flows = raw["cash_flows"]
+    calls = flows[flows.flow_type == "capital_call"].sort_values("cash_flow_id")
+    target = calls.iloc[len(calls) // 2]
+    flows.loc[flows.index[flows.cash_flow_id == target.cash_flow_id][0], "amount"] = float(target.amount) * 1.10
+    return raw, target
+
+
 def test_negative_control_detects_a_perturbed_cash_flow(built_warehouse: dict, marts: dict) -> None:
     """Perturb one capital call and confirm the reconciliation fails on exactly the rows it should.
 
@@ -465,23 +475,21 @@ def test_negative_control_detects_a_perturbed_cash_flow(built_warehouse: dict, m
     The assertion is not merely that something broke: it is that the mismatched rows are exactly
     the position's quarters from the perturbed flow onward, and no others. Too few rows would mean
     the comparison is insensitive; too many would mean it leaks across positions.
+
+    The portfolio mart must fail as well. It is built from the same cash flows, so that
+    investor's inception-to-date totals from the perturbed quarter onward include the overstated
+    call. Checking only the fund mart would let a portfolio comparison that compared a frame to
+    itself pass unnoticed.
     """
-    raw = {name: frame.copy() for name, frame in built_warehouse["raw"].items()}
-    flows = raw["cash_flows"]
-
-    # A capital call in the middle of a long-lived position, so there are quarters both before and
-    # after it. Chosen deterministically rather than at random.
-    calls = flows[flows.flow_type == "capital_call"].sort_values("cash_flow_id")
-    target = calls.iloc[len(calls) // 2]
-    row_index = flows.index[flows.cash_flow_id == target.cash_flow_id][0]
-    flows.loc[row_index, "amount"] = float(target.amount) * 1.10  # a 10% overstatement
-
-    perturbed_expected = expected_fund_performance(raw)
-    failures = _mismatches(marts["fund"], perturbed_expected, ["fund_id", "investor_id", "as_of_quarter"], FUND_COLUMNS)
-    assert not failures.empty, "perturbing a capital flow did not break the reconciliation at all"
-
+    raw, target = _perturb_middle_capital_call(built_warehouse["raw"])
     affected_quarter = containing_quarter_end(target.flow_date)
-    expected_failures = {
+
+    fund_failures = _mismatches(
+        marts["fund"], expected_fund_performance(raw), ["fund_id", "investor_id", "as_of_quarter"], FUND_COLUMNS
+    )
+    assert not fund_failures.empty, "perturbing a capital flow did not break the fund reconciliation at all"
+
+    expected_fund = {
         (target.fund_id, target.investor_id, quarter)
         for quarter in marts["fund"]
         .loc[
@@ -491,30 +499,91 @@ def test_negative_control_detects_a_perturbed_cash_flow(built_warehouse: dict, m
         .tolist()
         if quarter >= affected_quarter
     }
-    actual_failures = set(zip(failures.fund_id, failures.investor_id, failures.as_of_quarter, strict=True))
-
-    assert actual_failures == expected_failures, (
-        f"expected exactly the {len(expected_failures)} quarters of "
+    actual_fund = set(zip(fund_failures.fund_id, fund_failures.investor_id, fund_failures.as_of_quarter, strict=True))
+    assert actual_fund == expected_fund, (
+        f"fund mart: expected exactly the {len(expected_fund)} quarters of "
         f"{target.fund_id}/{target.investor_id} from {affected_quarter} onward to fail, "
-        f"got {len(actual_failures)}. "
-        f"Unexpected: {sorted(actual_failures - expected_failures)[:5]}. "
-        f"Missing: {sorted(expected_failures - actual_failures)[:5]}"
+        f"got {len(actual_fund)}. "
+        f"Unexpected: {sorted(actual_fund - expected_fund)[:5]}. "
+        f"Missing: {sorted(expected_fund - actual_fund)[:5]}"
+    )
+
+    portfolio_failures = _mismatches(
+        marts["portfolio"],
+        expected_portfolio_performance(raw),
+        ["investor_id", "as_of_quarter"],
+        PORTFOLIO_COLUMNS,
+    )
+    assert not portfolio_failures.empty, (
+        "perturbing a capital flow did not break the portfolio reconciliation; "
+        "the investor that owns the position must move"
+    )
+
+    expected_portfolio = {
+        (target.investor_id, quarter)
+        for quarter in marts["portfolio"].loc[marts["portfolio"].investor_id == target.investor_id, "as_of_quarter"]
+        if quarter >= affected_quarter
+    }
+    actual_portfolio = set(zip(portfolio_failures.investor_id, portfolio_failures.as_of_quarter, strict=True))
+    assert actual_portfolio == expected_portfolio, (
+        f"portfolio mart: expected exactly the {len(expected_portfolio)} quarters of "
+        f"{target.investor_id} from {affected_quarter} onward to fail, "
+        f"got {len(actual_portfolio)}. "
+        f"Unexpected: {sorted(actual_portfolio - expected_portfolio)[:5]}. "
+        f"Missing: {sorted(expected_portfolio - actual_portfolio)[:5]}"
     )
 
 
 def test_negative_control_leaves_other_positions_untouched(built_warehouse: dict, marts: dict) -> None:
     """The other side of the same control: a perturbation must not disturb positions it has nothing
     to do with. Together with the test above this bounds the comparison from both directions."""
-    raw = {name: frame.copy() for name, frame in built_warehouse["raw"].items()}
-    flows = raw["cash_flows"]
-    calls = flows[flows.flow_type == "capital_call"].sort_values("cash_flow_id")
-    target = calls.iloc[len(calls) // 2]
-    flows.loc[flows.index[flows.cash_flow_id == target.cash_flow_id][0], "amount"] = float(target.amount) * 1.10
+    raw, target = _perturb_middle_capital_call(built_warehouse["raw"])
 
-    failures = _mismatches(
+    fund_failures = _mismatches(
         marts["fund"], expected_fund_performance(raw), ["fund_id", "investor_id", "as_of_quarter"], FUND_COLUMNS
     )
-    other_pairs = {(f, i) for f, i in zip(failures.fund_id, failures.investor_id, strict=True)} - {
+    other_pairs = {(f, i) for f, i in zip(fund_failures.fund_id, fund_failures.investor_id, strict=True)} - {
         (target.fund_id, target.investor_id)
     }
-    assert not other_pairs, f"the perturbation leaked into unrelated positions: {sorted(other_pairs)[:5]}"
+    assert not other_pairs, f"the perturbation leaked into unrelated fund positions: {sorted(other_pairs)[:5]}"
+
+    portfolio_failures = _mismatches(
+        marts["portfolio"],
+        expected_portfolio_performance(raw),
+        ["investor_id", "as_of_quarter"],
+        PORTFOLIO_COLUMNS,
+    )
+    other_investors = set(portfolio_failures.investor_id) - {target.investor_id}
+    assert not other_investors, (
+        f"the perturbation leaked into unrelated investors' portfolio rows: {sorted(other_investors)[:5]}"
+    )
+
+
+def test_null_irr_is_compared_not_skipped(built_warehouse: dict, marts: dict) -> None:
+    """NULL IRR is a value the reconciliation must agree on, not a row it may drop.
+
+    `_mismatches` treats NULL vs NULL as agreement and NULL vs a number as a failure. Replacing
+    the mart's NULL IRRs with 0.0 must therefore light up exactly those rows -- the failure mode
+    the honesty rule exists to catch, a silent 'broke even' in place of 'could not be computed'.
+    """
+    expected = expected_fund_performance(built_warehouse["raw"])
+    actual_null_keys = {
+        (row.fund_id, row.investor_id, row.as_of_quarter)
+        for row in marts["fund"].loc[marts["fund"].net_irr.isna()].itertuples(index=False)
+    }
+    expected_null_keys = {
+        (row.fund_id, row.investor_id, row.as_of_quarter)
+        for row in expected.loc[expected.net_irr.isna()].itertuples(index=False)
+    }
+    assert actual_null_keys == expected_null_keys, (
+        f"NULL IRR keys disagree. mart {sorted(actual_null_keys)[:5]}, recomputed {sorted(expected_null_keys)[:5]}"
+    )
+    assert actual_null_keys, "this seed is expected to produce at least one uncomputable IRR"
+
+    fabricated = marts["fund"].copy()
+    fabricated.loc[fabricated.net_irr.isna(), "net_irr"] = 0.0
+    failures = _mismatches(fabricated, expected, ["fund_id", "investor_id", "as_of_quarter"], FUND_COLUMNS)
+    failed_keys = set(zip(failures.fund_id, failures.investor_id, failures.as_of_quarter, strict=True))
+    assert actual_null_keys <= failed_keys, (
+        f"replacing NULL IRR with 0.0 did not fail those rows; missed {sorted(actual_null_keys - failed_keys)}"
+    )

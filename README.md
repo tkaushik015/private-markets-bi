@@ -28,6 +28,14 @@ the same code can compile there, but that target has not been run. Both presenta
 still intended to read the same marts, so a number shown in Power BI and the same number on the
 web dashboard come from one definition rather than two implementations.
 
+**Phase 3 known gap (designed, not deployed).** `int_returns_by_quarter` and
+`int_portfolio_returns_by_quarter` import `lp_lens.metrics.returns`. On DuckDB that import
+resolves against the local package. On Snowflake, dbt Python models run in Snowpark, which has
+no `lp_lens` on `sys.path` unless the wheel is staged or the solver is inlined. IRR/PME will not
+run on a Snowflake target until that packaging step exists. Do not copy the solver into SQL to
+work around it — the project rule is one implementation. Tracked in
+[#5](https://github.com/tkaushik015/private-markets-bi/issues/5).
+
 ## Synthetic data
 
 Private markets fund-level data is not publicly available at the LP position level, so LP Lens
@@ -167,7 +175,8 @@ pytest
 ```
 
 Snowflake credentials, once that target exists, come only from environment variables. The DuckDB
-path above is the default in `warehouse/profiles.yml`.
+path above is the default in `warehouse/profiles.yml`. Python models still cannot run on Snowflake
+as written; see the Phase 3 known gap under [Architecture](#architecture).
 
 ## Design decisions
 
