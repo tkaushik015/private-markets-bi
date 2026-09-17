@@ -1,0 +1,2 @@
+EVALUATE ROW("qa_rows", COUNTROWS(qa_expected))
+EVALUATE FILTER(ADDCOLUMNS(VALUES(qa_expected[check_id]), "status", [QA Status], "actual", [QA Actual (display)], "expected", CALCULATE(MAX(qa_expected[expected]))), [status] <> "PASS")

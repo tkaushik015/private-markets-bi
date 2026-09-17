@@ -1,0 +1,326 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: QuantAI nightly warehouse refresh on Lambda (container image).
+
+# 源码里没有任何账号 ID / 桶名字面量：账号与区域走 CloudFormation 伪参数，
+# 桶名走 parameter：本机部署从 gitignore 的 .aws-*.local 文件传入，CI 从 repository secret 传入。
+# 换个账号，同一份模板即可部署。
+
+# 镜像仓库归 aws/bootstrap/quantai-cicd.yaml 管（quantaietl/etl、quantaietl/api，带生命周期规则）。
+# 正常只走 CI 部署。手动 sam deploy 必须显式传 --image-repositories 指向这两个仓库，
+# 不要用 --resolve-image-repos 或 --guided 的默认值，否则 SAM 会另建一个没有生命周期的 companion 栈；
+# 手动部署后还要照 .github/workflows/deploy.yml 最后一步给在跑的镜像打 deployed 标签。
+
+Parameters:
+  DataBucket:
+    Type: String
+    Description: >
+      Existing S3 data lake bucket. Owned by Terraform (infra/terraform/);
+      SAM only references it by name and never creates or modifies it.
+  ScheduleExpression:
+    Type: String
+    Default: cron(0 21 ? * MON-FRI *)
+    Description: EventBridge Scheduler cron, evaluated in ScheduleTimezone.
+  ScheduleTimezone:
+    Type: String
+    Default: America/New_York
+    Description: Market-local timezone so the job tracks the close, not UTC drift.
+  AlarmEmail:
+    Type: String
+    Default: ''
+    Description: Where alarms go. Empty means no subscription is created.
+  ApiKeyParameter:
+    Type: String
+    Default: /quantai/api-key
+    Description: >
+      SSM SecureString holding the shared secret. Only the NAME lives in this
+      template - the value is set out of band, so no secret ever enters the
+      template, the changeset, or CloudFormation state.
+
+Conditions:
+  HasAlarmEmail: !Not [!Equals [!Ref AlarmEmail, '']]
+
+Resources:
+
+  EtlLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${AWS::StackName}-etl
+      # 默认永不过期会无声长胖；这个任务每天一条，14 天足够排障。
+      RetentionInDays: 14
+
+  EtlRole:
+    Type: AWS::IAM::Role
+    Properties:
+      # 权限边界归 aws/bootstrap/quantai-cicd.yaml 管：执行角色只能写带着这条边界的应用角色。
+      PermissionsBoundary: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/quantai-cicd-app-boundary
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        # 最小权限：只读写这一个桶的三个前缀、只写 raw/，只写自己那个日志组。
+        # 没有 s3:ListBucket、没有 s3:DeleteObject、没有通配桶、没有 logs:* on *。
+        - PolicyName: etl-least-privilege
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ReadWriteOwnPrefixesOnly
+                Effect: Allow
+                Action: [s3:GetObject, s3:PutObject]
+                Resource:
+                  - !Sub arn:${AWS::Partition}:s3:::${DataBucket}/exports/*
+                  - !Sub arn:${AWS::Partition}:s3:::${DataBucket}/config/*
+                  - !Sub arn:${AWS::Partition}:s3:::${DataBucket}/warehouse/*
+              # raw/ 是给 Snowflake 的 Parquet 快照：ETL 只写不读，读它的是 Terraform 管的 Snowflake 角色。
+              - Sid: WriteRawExportsOnly
+                Effect: Allow
+                Action: s3:PutObject
+                Resource: !Sub arn:${AWS::Partition}:s3:::${DataBucket}/raw/*
+              - Sid: WriteOwnLogStreamOnly
+                Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents]
+                Resource: !Sub ${EtlLogGroup.Arn}:*
+
+  EtlFunction:
+    Type: AWS::Serverless::Function
+    DependsOn: EtlLogGroup
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-etl
+      PackageType: Image
+      Role: !GetAtt EtlRole.Arn
+      # 本地容器实测 17-22s；300s 给足余量又不至于挂死到 15 分钟上限。
+      Timeout: 300
+      # 1024 MB = 实测成本拐点（aws/bench/results/quantai-etl-etl.json）：任务是 IO 瓶颈，
+      # 每次成本与 512 MB 基本持平但快一倍，对实测峰值 531 MB 留约 2x 余量；512 MB 峰值 511 MB，差 1 MB 就 OOM。
+      # 写死而不做成参数：改参数 Default 对已有栈不生效，sam deploy 对没显式传的参数沿用上次的值
+      # （CI #4 实测：Default 已改成 1024，线上仍是 1769）。
+      MemorySize: 1024
+      # /tmp 要放云侧 duckdb（随新闻累积增长）+ CSV 导出。
+      EphemeralStorage:
+        Size: 1024
+      Environment:
+        Variables:
+          QUANTAI_S3_BUCKET: !Ref DataBucket
+      Events:
+        Nightly:
+          Type: ScheduleV2
+          Properties:
+            ScheduleExpression: !Ref ScheduleExpression
+            ScheduleExpressionTimezone: !Ref ScheduleTimezone
+            Description: QuantAI nightly warehouse refresh (after US close).
+            # SAM 生成的定时器角色只能从这里拿到边界：函数显式指定了 Role，函数级或 Globals 的 PermissionsBoundary 不生效。
+            PermissionsBoundary: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/quantai-cicd-app-boundary
+    Metadata:
+      # DockerContext 是仓库根：Dockerfile 要 COPY quantai/ scripts/ warehouse/ configs/
+      DockerContext: ..
+      Dockerfile: aws/etl/Dockerfile
+      DockerTag: latest
+
+  # --------------------------------------------------------------- 告警
+  # 本地版本的失败模式是：warehouse 挂了、report 正常退出，Task Scheduler 的
+  # Last Result 把整体伪装成成功，没人看日志就永远发现不了。这两个告警就是替掉它。
+
+  AlarmTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: QuantAI alarms
+
+  AlarmSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasAlarmEmail
+    Properties:
+      Protocol: email
+      Endpoint: !Ref AlarmEmail
+      TopicArn: !Ref AlarmTopic
+
+  EtlFailureAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${AWS::StackName}-etl-failed
+      AlarmDescription: Nightly ETL raised an unhandled error.
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - { Name: FunctionName, Value: !Ref EtlFunction }
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      # 每天只跑一次，绝大多数周期本来就没数据 —— 缺数据不是故障。
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlarmTopic]
+
+  NewsFeedFailureAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${AWS::StackName}-news-feeds-degraded
+      AlarmDescription: >
+        RSS feeds failed during the run. The ETL degrades gracefully and still
+        exits 0, so without this metric the warehouse silently loses news rows.
+      # 由 handler 用 Embedded Metric Format 从日志里发出，没有 PutMetricData 调用。
+      Namespace: QuantAI/ETL
+      MetricName: NewsFeedFailures
+      Dimensions:
+        - { Name: FunctionName, Value: !Ref EtlFunction }
+      Statistic: Maximum
+      Period: 3600
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlarmTopic]
+
+  # 上面两个告警都要求函数真的跑了。下面两个抓"没跑"：定时器调了但失败，或者根本没调。
+  SchedulerTargetErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${AWS::StackName}-schedule-target-error
+      AlarmDescription: >
+        EventBridge Scheduler tried to invoke the nightly ETL and failed. The function never ran,
+        so the Lambda Errors alarm cannot see it.
+      # 账号级指标（不带维度）：EtlFunctionNightly 是本区域唯一的定时器；以后加别的定时器，改成按 schedule group 告警。
+      Namespace: AWS/Scheduler
+      MetricName: TargetErrorCount
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlarmTopic]
+
+  EtlNotInvokedAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${AWS::StackName}-etl-not-invoked
+      AlarmDescription: >
+        The nightly ETL has not been invoked for 4 days: the schedule was disabled, deleted or never
+        fired. Neither the Scheduler nor the Lambda error alarm can see a run that never started.
+      # 没有调用时 Lambda 不发 Invocations 数据点，所以缺数据就是没跑，按报警处理。用 4 个 1 天周期而不是 3 个：
+      # 纽约周五晚那次在 UTC 周六 01:00（冬令时 02:00），下一次在 UTC 周二同一时刻，中间正好 72 小时，
+      # 3 天正好卡在线上，周一晚新数据进来之前可能误报一次；4 天留出一整天余量，费用不变。
+      Namespace: AWS/Lambda
+      MetricName: Invocations
+      Dimensions:
+        - { Name: FunctionName, Value: !Ref EtlFunction }
+      Statistic: Sum
+      Period: 86400
+      EvaluationPeriods: 4
+      DatapointsToAlarm: 4
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+      AlarmActions: [!Ref AlarmTopic]
+
+  # --------------------------------------------------------------- 计算 API
+
+  HttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: v1
+      # 限流是钱包的保险丝，与鉴权互相独立：即使 key 泄露也烧不动账单。
+      DefaultRouteSettings:
+        ThrottlingRateLimit: 5
+        ThrottlingBurstLimit: 10
+
+  ApiLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${AWS::StackName}-api
+      RetentionInDays: 14
+
+  ApiRole:
+    Type: AWS::IAM::Role
+    Properties:
+      PermissionsBoundary: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/quantai-cicd-app-boundary
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: api-least-privilege
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # API 只读行情，连写权限都不给（和 ETL 角色是两个角色，权限不共用）。
+              - Sid: ReadExportsOnly
+                Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub arn:${AWS::Partition}:s3:::${DataBucket}/exports/*
+              - Sid: ReadOwnApiKeyOnly
+                Effect: Allow
+                Action: ssm:GetParameter
+                Resource: !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${ApiKeyParameter}
+              - Sid: DecryptViaSsmOnly
+                Effect: Allow
+                Action: kms:Decrypt
+                Resource: '*'
+                # kms:Decrypt 无法按资源收紧到默认托管密钥，改用条件把它锁死在 SSM 通道上。
+                Condition:
+                  StringEquals:
+                    kms:ViaService: !Sub ssm.${AWS::Region}.amazonaws.com
+              - Sid: WriteOwnLogStreamOnly
+                Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents]
+                Resource: !Sub ${ApiLogGroup.Arn}:*
+
+  ApiFunction:
+    Type: AWS::Serverless::Function
+    DependsOn: ApiLogGroup
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-api
+      PackageType: Image
+      Role: !GetAtt ApiRole.Arn
+      # 请求路径上一次 S3/SSM 调用最坏约 9 s（aws/api/handler.py 的客户端超时）；/signals 在新执行环境上
+      # 先读 key 再读行情表，最坏约 18 s。20 s 让这种情况以 503 返回，而不是被超时掐断。
+      Timeout: 20
+      MemorySize: 1024
+      Environment:
+        Variables:
+          QUANTAI_S3_BUCKET: !Ref DataBucket
+          QUANTAI_API_KEY_PARAM: !Ref ApiKeyParameter
+      Events:
+        OptionsPrice:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Method: POST
+            Path: /options/price
+        Signals:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Method: POST
+            Path: /signals
+        Health:
+          # 不带 key。只回 {"ready": true/false}：服务它的执行环境是否已经读到 API key，不带任何报错细节。
+          # 和不带 key 的 POST 共用同一次缓存的 key 读取（成功就缓存；读失败后 60 秒内不再打 SSM），不读行情表；
+          # 和每条路由一样受 stage 的 DefaultRouteSettings 限流（每条路由各自 5 rps、突发 10，三条合计约 15 rps）。
+          # CI 每次部署后查它。
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Method: GET
+            Path: /health
+    Metadata:
+      DockerContext: ..
+      Dockerfile: aws/api/Dockerfile
+      DockerTag: latest
+
+Outputs:
+  FunctionName:
+    Value: !Ref EtlFunction
+  LogGroup:
+    Value: !Ref EtlLogGroup
+  RoleArn:
+    Value: !GetAtt EtlRole.Arn
+  ApiEndpoint:
+    Value: !Sub https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/v1
+  ApiFunctionName:
+    Value: !Ref ApiFunction

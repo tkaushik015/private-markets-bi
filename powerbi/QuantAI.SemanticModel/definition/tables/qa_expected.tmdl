@@ -1,0 +1,38 @@
+table qa_expected
+	isHidden
+	lineageTag: 1b25cc24-d6b6-4512-a508-7ce9a5dd4c05
+
+	column check_id
+		dataType: string
+		lineageTag: bc8f7799-ce0a-4f38-aff1-64d08a3cc501
+		summarizeBy: none
+		sourceColumn: check_id
+
+		annotation SummarizationSetBy = Automatic
+
+	column description
+		dataType: string
+		lineageTag: 0870a18e-9925-4b97-980d-9787b0c63eb0
+		summarizeBy: none
+		sourceColumn: description
+
+		annotation SummarizationSetBy = Automatic
+
+	column expected
+		dataType: string
+		lineageTag: b5b5110f-496a-43a7-ad73-235164e45183
+		summarizeBy: none
+		sourceColumn: expected
+
+		annotation SummarizationSetBy = Automatic
+
+	partition qa_expected = m
+		mode: import
+		source =
+				let
+					Source = Csv.Document(File.Contents(VerifyFolder & "\expected_values.csv"), [Delimiter = ",", Columns = 3, Encoding = 65001, QuoteStyle = QuoteStyle.Csv]),
+					Headers = Table.PromoteHeaders(Source, [PromoteAllScalars = true]),
+					Typed = Table.TransformColumnTypes(Headers, {{"check_id", type text}, {"description", type text}, {"expected", type text}})
+				in
+					Typed
+

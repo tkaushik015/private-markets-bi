@@ -1,0 +1,9 @@
+# Copy to terraform.tfvars (gitignored) and fill in.
+data_bucket_name = "your-data-lake-bucket"
+alarm_email      = "you@example.com"
+
+# First apply, before the Snowflake integration exists: keep both empty (snowflake.tf then uses a
+# placeholder trust). After DESC INTEGRATION QUANTAI_S3_RAW, fill both and apply again. There are no
+# defaults on purpose: a missing value fails the plan instead of silently reverting the trust.
+snowflake_iam_user_arn = ""
+snowflake_external_id  = ""

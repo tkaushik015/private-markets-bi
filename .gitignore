@@ -1,0 +1,170 @@
+# QuantAI .gitignore
+
+# ====================
+# Python
+# ====================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# ====================
+# 虚拟环境
+# ====================
+venv/
+venv311/
+ENV/
+env/
+.venv/
+
+# ====================
+# IDE
+# ====================
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ====================
+# Jupyter Notebook
+# ====================
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# ====================
+# 数据目录（不提交）
+# ====================
+/data/
+!/data/.gitkeep
+
+# ====================
+# 回测/结果产物（不提交）
+# ====================
+/results/
+backtest_result.csv
+backtest_result.png
+
+# ====================
+# 模型文件（不提交）——锚定仓库根：无斜杠前缀会误杀 warehouse/models/（dbt SQL 模型）
+# ====================
+/models/
+!/models/.gitkeep
+
+# ====================
+# 日志
+# ====================
+logs/
+*.log
+
+# ====================
+# 环境变量与密钥
+# ====================
+.env
+.env.local
+*.env
+.env.*
+*.pem
+*.key
+secrets.yaml
+
+# 本地配置覆盖（人设/密钥/本机路径，不提交）
+*.local.yaml
+
+# ====================
+# 系统文件
+# ====================
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ====================
+# 临时文件
+# ====================
+tmp/
+temp/
+*.tmp
+*.bak
+
+/scripts/eval_outputs/
+/scripts/eval_results/
+
+# ====================
+# 桌面宠物集群（保留本地、不入公开仓；2026-07-02 git rm --cached）
+# ====================
+windows_app/
+node_modules/
+爱尔奎特/
+玛丽偶像 _vts/
+长离带水印/
+/launch.py
+build_exe.py
+package.json
+package-lock.json
+启动交易终端.bat
+configs/secretary.yaml
+
+# ====================
+# Local-only helper scripts
+# ====================
+/scripts/overnight_queue.ps1
+
+/scripts/verify_fix.py
+
+# ====================
+# 测试覆盖率
+# ====================
+htmlcov/
+.coverage
+.coverage.*
+.pytest_cache/
+
+# dbt 生成物（可再生）
+warehouse/target/
+warehouse/dbt_packages/
+warehouse/.user.yml
+
+# Power BI local state (machine-local cache/settings, saved by Desktop)
+powerbi/**/.pbi/cache.abf
+powerbi/**/.pbi/localSettings.json
+runs/
+# 本地过程文档与本机便利启动器（保留本地，不进交付面）
+docs/engineering_log_phase2_cn_infusion.md
+启动仪表盘.bat
+每日刷新.bat
+每日决策日志.bat
+盘中快评.bat
+scripts/run_hidden.vbs
+
+# AWS/SAM 构建产物与本机部署配置（含账号 ID/桶名，永不入库）
+.aws-sam/
+samconfig.toml
+phase0_*.txt
+
+# Terraform 本机状态与变量（含账号 ID）
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+
+# 本机 AWS 资源名（桶名不进仓库）
+.aws-*.local
+
+# Terraform backend 本机配置（含 state 桶名）
+*.local.hcl

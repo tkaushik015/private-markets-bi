@@ -1,0 +1,97 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "quantai"
+version = "0.2.0"
+description = "Personal quant workbench: DuckDB/dbt star-schema warehouse, indicator and backtest engine, local-LLM analyst, Streamlit console, Power BI artifact"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+
+# ----------------------------------------------------------------------
+# 核心依赖：业务代码直接 import、且无 GPU/重型负担的库。
+# ----------------------------------------------------------------------
+dependencies = [
+    "numpy>=1.24.0",          # 数值地基（pandas/scipy 的底座）
+    "pandas>=2.0.0",          # 表格/时间序列
+    "pyarrow>=14.0.0",        # parquet 读写
+    "scipy>=1.11.0",          # 科学计算
+    "ta>=0.11.0",             # 技术指标
+    "yfinance>=0.2.36",       # 美股行情（US-only）
+    "pandas_market_calendars>=4.0",  # NYSE 交易日历（含一次性休市/半日市，胜过手搓规则）
+    "requests>=2.31.0",       # HTTP
+    "feedparser>=6.0.0",      # RSS 新闻解析
+    "pydantic>=2.5.0",        # 配置/数据校验（本模块用它）
+    "pyyaml>=6.0.0",          # YAML 配置
+    "duckdb>=1.0.0",          # 本地数据仓库（嵌入式列存 SQL，warehouse/ 层）
+    "python-dotenv>=1.0.0",   # .env 加载
+    "loguru>=0.7.0",          # 日志
+    "tqdm>=4.66.0",           # 进度条
+]
+
+[project.optional-dependencies]
+# LLM 训练/推理（需要 GPU/CUDA）
+llm = [
+    "torch>=2.1.0",
+    "transformers>=4.36.0",
+    "peft>=0.7.0",
+    "trl>=0.8.0",
+    "accelerate>=0.25.0",
+    "datasets>=2.16.0",
+    "bitsandbytes>=0.41.0",
+    "sentencepiece>=0.1.99",
+]
+# HTTP 服务
+serve = [
+    "fastapi>=0.108.0",
+    "uvicorn>=0.25.0",
+    "openai>=1.12.0",         # OpenAI 兼容客户端（本地 vLLM/Ollama）
+]
+# 仪表盘/可视化
+ui = [
+    "streamlit>=1.31.0",
+    "plotly>=5.18.0",
+    "matplotlib>=3.8.0",
+    "mplfinance>=0.12.10b0",  # K 线图（Chartist VLM 的输入图）
+]
+# 数据仓库 SQL 转换层（dbt CLI 工具链，业务代码不 import 它）
+warehouse = [
+    "dbt-duckdb>=1.9.0",      # raw(parquet/ETL) -> staging -> marts 的 SQL 转换 + 断言测试
+]
+# 同一个 dbt 项目的 Snowflake target（profiles.yml 里的 snowflake 输出）。单列成 extra：
+# dbt-snowflake 1.12 把 certifi 钉在 2025.4.26 以下，不该随 warehouse 一起装进 ETL 镜像。
+snowflake = [
+    "dbt-snowflake>=1.10.0",
+]
+dev = [
+    "pytest>=7.4.0",
+    "ruff>=0.4.0",
+    "mypy>=1.8.0",
+    "jupyter>=1.0.0",
+    "ipywidgets>=8.1.0",
+]
+
+[project.scripts]
+quantai-dashboard = "quantai.ui.launch:main"
+
+[tool.setuptools.packages.find]
+include = ["quantai*"]
+
+[tool.pytest.ini_options]
+# 让 `pytest` 从仓库根目录就能 `import quantai`，无需先 pip install -e .
+pythonpath = ["."]
+testpaths = ["tests"]
+# importlib 导入模式：允许不同目录下同名测试文件（如各模块各自的 test_no_lookahead.py）
+# 共存而不冲突，无需到处加 __init__.py（pytest 官方推荐的现代方式）。
+addopts = "-q --import-mode=importlib"
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
+warn_unused_ignores = true

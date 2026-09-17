@@ -1,0 +1,254 @@
+"""专业图表构建（plotly，纯函数层）：K 线 + 指标叠加、RSI/MACD 副图、盈亏条形。
+
+设计：本模块**只产 plotly Figure**（输入 DataFrame/快照，无 streamlit、无网络），
+故可离线单测（断言 trace 结构/主题），渲染层（streamlit_app）只管 `st.plotly_chart`。
+指标全部复用 `quantai.analysis`（与 CLI/仓库同一套数字）。
+
+主题：暗色专业风，美股惯例绿涨红跌。全部色值取自 `quantai.ui.theme`
+（设计令牌唯一定义处，与 Power BI 主题同源）——本文件不写任何 hex。
+"""
+
+from __future__ import annotations
+
+from typing import Sequence
+
+import pandas as pd
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+
+from quantai.analysis import bollinger, macd, rsi, sma
+
+from quantai.ui import theme
+
+UP_COLOR = theme.UP
+DOWN_COLOR = theme.DOWN
+_BG = theme.BG
+_GRID = theme.GRID
+_TEXT = theme.CHART_TEXT
+
+DARK_LAYOUT = dict(
+    template="plotly_dark",
+    paper_bgcolor=_BG,
+    plot_bgcolor=_BG,
+    font=dict(color=_TEXT, size=12),
+    xaxis=dict(gridcolor=_GRID, rangeslider=dict(visible=False)),
+    yaxis=dict(gridcolor=_GRID),
+    margin=dict(l=40, r=20, t=40, b=30),
+    legend=dict(orientation="h", yanchor="bottom", y=1.01, x=0),
+)
+
+
+def candlestick_figure(
+    df: pd.DataFrame,
+    symbol: str,
+    ma_windows: Sequence[int] = (20, 50),
+    show_bollinger: bool = True,
+) -> go.Figure:
+    """K 线蜡烛图 + 均线/布林叠加 + 成交量副图。
+
+    df 需含 open/high/low/close（volume 可选）。指标热身期自然缺画（NaN 不连线）。
+    """
+    has_volume = "volume" in df.columns
+    fig = make_subplots(
+        rows=2 if has_volume else 1,
+        cols=1,
+        shared_xaxes=True,
+        row_heights=[0.78, 0.22] if has_volume else [1.0],
+        vertical_spacing=0.02,
+    )
+    fig.add_trace(
+        go.Candlestick(
+            x=df.index,
+            open=df["open"],
+            high=df["high"],
+            low=df["low"],
+            close=df["close"],
+            name=symbol,
+            increasing_line_color=UP_COLOR,
+            decreasing_line_color=DOWN_COLOR,
+        ),
+        row=1,
+        col=1,
+    )
+    close = df["close"].astype(float)
+    for w in ma_windows:
+        fig.add_trace(
+            go.Scatter(x=df.index, y=sma(close, w), name=f"MA{w}", mode="lines", line=dict(width=1)),
+            row=1,
+            col=1,
+        )
+    if show_bollinger:
+        bb = bollinger(close)
+        fig.add_trace(
+            go.Scatter(x=df.index, y=bb["bb_upper"], name="BB上轨", mode="lines",
+                       line=dict(width=1, dash="dot", color=theme.BAND)),
+            row=1, col=1,
+        )
+        fig.add_trace(
+            go.Scatter(x=df.index, y=bb["bb_lower"], name="BB下轨", mode="lines",
+                       line=dict(width=1, dash="dot", color=theme.BAND),
+                       fill="tonexty", fillcolor="rgba(92,107,192,0.08)"),
+            row=1, col=1,
+        )
+    if has_volume:
+        colors = [UP_COLOR if c >= o else DOWN_COLOR for o, c in zip(df["open"], df["close"])]
+        fig.add_trace(
+            go.Bar(x=df.index, y=df["volume"], name="成交量", marker_color=colors, opacity=0.6),
+            row=2,
+            col=1,
+        )
+    fig.update_layout(title=f"{symbol} 日线", **DARK_LAYOUT)
+    # 跳过周末：日线蜡烛不留非交易日空洞（工作台图已有，此处曾漏——实锤补齐）
+    fig.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"])])
+    return fig
+
+
+def rsi_macd_figure(df: pd.DataFrame) -> go.Figure:
+    """RSI(14) + MACD 副图（两行）。超买/超卖参考线 70/30。"""
+    close = df["close"].astype(float)
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.06,
+                        subplot_titles=("RSI(14)", "MACD(12,26,9)"))
+    fig.add_trace(go.Scatter(x=df.index, y=rsi(close, 14), name="RSI", mode="lines",
+                             line=dict(color=theme.MA, width=1.5)), row=1, col=1)
+    fig.add_hline(y=70, line_dash="dash", line_color=DOWN_COLOR, opacity=0.5, row=1, col=1)
+    fig.add_hline(y=30, line_dash="dash", line_color=UP_COLOR, opacity=0.5, row=1, col=1)
+
+    m = macd(close)
+    hist_colors = [UP_COLOR if (v == v and v >= 0) else DOWN_COLOR for v in m["macd_histogram"]]
+    fig.add_trace(go.Bar(x=df.index, y=m["macd_histogram"], name="Hist",
+                         marker_color=hist_colors, opacity=0.7), row=2, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=m["macd"], name="MACD", mode="lines",
+                             line=dict(color=theme.MACD_FAST, width=1.2)), row=2, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=m["macd_signal"], name="Signal", mode="lines",
+                             line=dict(color=theme.MACD_SLOW, width=1.2)), row=2, col=1)
+    fig.update_layout(height=420, **DARK_LAYOUT)
+    fig.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"])])
+    return fig
+
+
+def workstation_figure(
+    df: pd.DataFrame,
+    symbol: str,
+    kind: str = "candle",  # "candle" | "line"
+    ma_windows: Sequence[int] = (),
+    show_bollinger: bool = False,
+    show_vwap: bool = False,
+    show_volume: bool = True,
+    show_rsi: bool = True,
+    show_macd: bool = True,
+) -> go.Figure:
+    """行情工作台主图：价格 + 可开关的指标面板（券商终端式布局）。
+
+    - 价格窗格：蜡烛或线图 + 均线/布林/VWAP 叠加。
+    - 副窗格按开关动态增减：成交量 / RSI(14) / MACD。
+    - VWAP 口径：**按交易日内累计**（sum(典型价×量)/sum量，每天重置）——只有
+      盘中分钟级数据才有意义；日线数据请不要开 VWAP（调用方负责禁用）。
+    指标按可见 bar 序列计算（盘中图上的 RSI/MACD 是分钟 bar 口径，非日线）。
+    """
+    panes: list[str] = ["price"]
+    if show_volume and "volume" in df.columns:
+        panes.append("volume")
+    if show_rsi:
+        panes.append("rsi")
+    if show_macd:
+        panes.append("macd")
+    heights = {1: [1.0], 2: [0.7, 0.3], 3: [0.6, 0.2, 0.2], 4: [0.55, 0.15, 0.15, 0.15]}
+    fig = make_subplots(
+        rows=len(panes), cols=1, shared_xaxes=True,
+        row_heights=heights[len(panes)], vertical_spacing=0.02,
+    )
+    close = df["close"].astype(float)
+
+    # 价格窗格
+    if kind == "candle" and all(c in df.columns for c in ("open", "high", "low")):
+        fig.add_trace(
+            go.Candlestick(
+                x=df.index, open=df["open"], high=df["high"], low=df["low"], close=close,
+                name=symbol, increasing_line_color=UP_COLOR, decreasing_line_color=DOWN_COLOR,
+            ),
+            row=1, col=1,
+        )
+    else:
+        up = len(close) >= 2 and close.iloc[-1] >= close.iloc[0]
+        fig.add_trace(
+            go.Scatter(x=df.index, y=close, name=symbol, mode="lines",
+                       line=dict(color=UP_COLOR if up else DOWN_COLOR, width=1.6)),
+            row=1, col=1,
+        )
+    for w in ma_windows:
+        fig.add_trace(
+            go.Scatter(x=df.index, y=sma(close, int(w)), name=f"MA{w}", mode="lines",
+                       line=dict(width=1)),
+            row=1, col=1,
+        )
+    if show_bollinger:
+        bb = bollinger(close)
+        for col, dash in (("bb_upper", "dot"), ("bb_lower", "dot")):
+            fig.add_trace(
+                go.Scatter(x=df.index, y=bb[col], name=col, mode="lines",
+                           line=dict(width=1, dash=dash, color=theme.BAND), showlegend=False),
+                row=1, col=1,
+            )
+    if show_vwap and "volume" in df.columns and "high" in df.columns:
+        typical = (df["high"].astype(float) + df["low"].astype(float) + close) / 3
+        vol = df["volume"].astype(float)
+        day = pd.Series(pd.to_datetime(df.index).date, index=df.index)
+        cum_pv = (typical * vol).groupby(day).cumsum()
+        cum_v = vol.groupby(day).cumsum()
+        vwap = (cum_pv / cum_v.where(cum_v > 0)).rename("VWAP")
+        fig.add_trace(
+            go.Scatter(x=df.index, y=vwap, name="VWAP", mode="lines",
+                       line=dict(width=1.2, color=theme.MACD_SLOW)),
+            row=1, col=1,
+        )
+
+    row = 2
+    if "volume" in panes:
+        colors = (
+            [UP_COLOR if c >= o else DOWN_COLOR for o, c in zip(df["open"], close)]
+            if "open" in df.columns else UP_COLOR
+        )
+        fig.add_trace(go.Bar(x=df.index, y=df["volume"], name="Vol",
+                             marker_color=colors, opacity=0.55, showlegend=False),
+                      row=row, col=1)
+        row += 1
+    if "rsi" in panes:
+        fig.add_trace(go.Scatter(x=df.index, y=rsi(close, 14), name="RSI", mode="lines",
+                                 line=dict(color=theme.MA, width=1.2)), row=row, col=1)
+        fig.add_hline(y=70, line_dash="dash", line_color=DOWN_COLOR, opacity=0.4, row=row, col=1)
+        fig.add_hline(y=30, line_dash="dash", line_color=UP_COLOR, opacity=0.4, row=row, col=1)
+        row += 1
+    if "macd" in panes:
+        m = macd(close)
+        hist_colors = [UP_COLOR if (v == v and v >= 0) else DOWN_COLOR for v in m["macd_histogram"]]
+        fig.add_trace(go.Bar(x=df.index, y=m["macd_histogram"], name="Hist",
+                             marker_color=hist_colors, opacity=0.7, showlegend=False), row=row, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=m["macd"], name="MACD", mode="lines",
+                                 line=dict(color=theme.MACD_FAST, width=1.1)), row=row, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=m["macd_signal"], name="Signal", mode="lines",
+                                 line=dict(color=theme.MACD_SLOW, width=1.1)), row=row, col=1)
+
+    fig.update_layout(height=340 + 120 * (len(panes) - 1), **DARK_LAYOUT)
+    fig.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"])] if kind == "candle" else None)
+    # 轻交互（模拟盘 line_chart 手感）：十字线悬浮统一读数、平移拖拽；
+    # 工具栏由渲染层 config displayModeBar=False 关闭
+    fig.update_layout(hovermode="x unified", dragmode="pan")
+    fig.update_xaxes(
+        showspikes=True, spikemode="across", spikesnap="cursor",
+        spikethickness=1, spikedash="dot", spikecolor=theme.TEXT_MUTED,
+    )
+    return fig
+
+
+def pnl_bar_figure(positions: list[dict], title: str = "未实现盈亏（USD）") -> go.Figure:
+    """每标的未实现盈亏条形图（输入 `PositionSnapshot.as_dict()` 列表）。"""
+    rows = sorted(positions, key=lambda p: p.get("unrealized_pnl", 0.0))
+    symbols = [p["symbol"] for p in rows]
+    pnl = [p.get("unrealized_pnl", float("nan")) for p in rows]
+    colors = [UP_COLOR if (v == v and v >= 0) else DOWN_COLOR for v in pnl]
+    fig = go.Figure(go.Bar(x=pnl, y=symbols, orientation="h", marker_color=colors,
+                           text=[f"{v:+,.0f}" if v == v else "n/a" for v in pnl],
+                           textposition="outside"))
+    fig.add_vline(x=0, line_color=_TEXT, opacity=0.4)
+    fig.update_layout(title=title, height=max(220, 60 * len(rows) + 120), **DARK_LAYOUT)
+    return fig

@@ -1,0 +1,502 @@
+"""pandas ETL：把项目数据（价格 / 日历 / 持仓 / 成交 / 信号 / 回测）装载进 `raw` 层。
+
+分工（ELT，非 ETL 的 T 在这里）：
+- **这里只做 Extract + Load**：接收 DataFrame/领域对象 -> 原样写 `raw.*`（附 `loaded_at`
+  审计列），**不做业务变换**——清洗/改名/建模全部在 dbt SQL（staging -> marts），
+  变换逻辑因此可被 dbt test 断言、可被 SQL 阅读者审计。
+- **幂等 + 原子**：每个 loader 都是「先删本批次键，再插入」（delete-then-insert by
+  batch key），且整段包在显式事务里（`_tx`）——重跑不产生重复行，**中途失败回滚、
+  旧批次不丢**（两者都有测试断言）。
+- **可测**：全部函数吃注入的连接（`connect(":memory:")`）+ 合成数据，离线单测。
+"""
+
+from __future__ import annotations
+
+from contextlib import contextmanager
+from typing import Iterable, Mapping
+
+import pandas as pd
+from duckdb import DuckDBPyConnection
+from loguru import logger
+
+from quantai.backtest.engine import BacktestResult
+from quantai.data.calendar import TradingCalendar
+from quantai.portfolio.loader import Portfolio
+
+
+@contextmanager
+def _tx(con: DuckDBPyConnection):
+    """显式事务：delete-then-insert 必须原子。
+
+    DuckDB Python 连接默认逐语句 autocommit--DELETE 先落盘、INSERT 再失败会
+    **永久毁掉上一批数据**（审计实测确认：坏 volume 值重载 -> 旧批次清零）。
+    包上 BEGIN/COMMIT，失败 ROLLBACK 保旧批。
+    """
+    con.execute("BEGIN")
+    try:
+        yield
+        con.execute("COMMIT")
+    except BaseException:
+        con.execute("ROLLBACK")
+        raise
+
+
+_AUDIT = "loaded_at TIMESTAMP DEFAULT current_timestamp"
+
+#: 全部 raw 表 DDL（幂等）。集中登记，`init_raw_tables` 一次建齐——
+#: 某类数据还没产生时（如还没跑过 live 就没有成交），dbt 仍能对空表建模，
+#: 而不是 Catalog Error（实测踩过的坑：CLI 首跑无 trades 表 -> dbt build 失败）。
+_DDL: dict[str, str] = {
+    "prices": f"""CREATE TABLE IF NOT EXISTS raw.prices (
+        symbol VARCHAR NOT NULL,
+        date DATE NOT NULL,
+        open DOUBLE, high DOUBLE, low DOUBLE, close DOUBLE, volume BIGINT,
+        {_AUDIT})""",
+    "trading_days": f"""CREATE TABLE IF NOT EXISTS raw.trading_days (
+        date DATE NOT NULL,
+        is_early_close BOOLEAN NOT NULL,
+        {_AUDIT})""",
+    "positions": f"""CREATE TABLE IF NOT EXISTS raw.positions (
+        as_of DATE NOT NULL,
+        symbol VARCHAR NOT NULL,
+        shares DOUBLE NOT NULL,
+        cost_basis DOUBLE NOT NULL,
+        open_date DATE NOT NULL,
+        {_AUDIT})""",
+    "portfolio_cash": f"""CREATE TABLE IF NOT EXISTS raw.portfolio_cash (
+        as_of DATE NOT NULL,
+        cash DOUBLE NOT NULL,
+        {_AUDIT})""",
+    "trades": f"""CREATE TABLE IF NOT EXISTS raw.trades (
+        run_id VARCHAR NOT NULL,
+        seq INTEGER NOT NULL,
+        symbol VARCHAR NOT NULL,
+        action VARCHAR NOT NULL,
+        price DOUBLE,
+        shares DOUBLE,
+        trace_id VARCHAR,
+        {_AUDIT})""",
+    "signals": f"""CREATE TABLE IF NOT EXISTS raw.signals (
+        symbol VARCHAR NOT NULL,
+        date DATE NOT NULL,
+        trend_signal INTEGER, momentum_signal INTEGER, ma_cross_signal INTEGER,
+        breakout_signal INTEGER, composite_signal DOUBLE, signal_strength VARCHAR,
+        {_AUDIT})""",
+    "backtest_runs": f"""CREATE TABLE IF NOT EXISTS raw.backtest_runs (
+        run_id VARCHAR NOT NULL,
+        strategy VARCHAR, symbol VARCHAR, fill_timing VARCHAR,
+        total_return DOUBLE, cagr DOUBLE, annual_volatility DOUBLE, sharpe DOUBLE,
+        max_drawdown DOUBLE, win_rate DOUBLE, total_turnover DOUBLE,
+        start_date VARCHAR, end_date VARCHAR, trading_days INTEGER,
+        {_AUDIT})""",
+    "backtest_equity": f"""CREATE TABLE IF NOT EXISTS raw.backtest_equity (
+        run_id VARCHAR NOT NULL,
+        date DATE NOT NULL,
+        equity DOUBLE NOT NULL,
+        daily_return DOUBLE,
+        {_AUDIT})""",
+    "news": f"""CREATE TABLE IF NOT EXISTS raw.news (
+        symbol VARCHAR,
+        title VARCHAR NOT NULL,
+        summary VARCHAR,
+        link VARCHAR NOT NULL,
+        published TIMESTAMP,
+        source VARCHAR,
+        {_AUDIT})""",
+    "news_scores": f"""CREATE TABLE IF NOT EXISTS raw.news_scores (
+        link VARCHAR NOT NULL,
+        sentiment DOUBLE NOT NULL,
+        label VARCHAR,
+        model VARCHAR,
+        scored_at TIMESTAMP DEFAULT current_timestamp,
+        {_AUDIT})""",
+    "event_odds": f"""CREATE TABLE IF NOT EXISTS raw.event_odds (
+        as_of DATE NOT NULL,
+        market_id VARCHAR NOT NULL,
+        condition_id VARCHAR,
+        event_title VARCHAR NOT NULL,
+        question VARCHAR NOT NULL,
+        yes_price DOUBLE NOT NULL,
+        volume_24h DOUBLE,
+        end_date VARCHAR,
+        category VARCHAR,
+        {_AUDIT})""",
+}
+
+
+def init_raw_tables(con: DuckDBPyConnection) -> None:
+    """把全部 raw 表建齐（空表也建）——保证 dbt 全模型可编译，无论数据是否已产生。"""
+    for ddl in _DDL.values():
+        con.execute(ddl)
+
+
+def _ensure(con: DuckDBPyConnection, ddl: str) -> None:
+    con.execute(ddl)
+
+
+# --------------------------------------------------------------------------- #
+# prices
+# --------------------------------------------------------------------------- #
+def load_prices(con: DuckDBPyConnection, prices: Mapping[str, pd.DataFrame]) -> int:
+    """{symbol: OHLCV df} -> `raw.prices`。批次键 = symbol（重跑该 symbol 全量替换）。
+
+    输入 df 需含 close（open/high/low/volume 可缺，落 NULL）；索引为日期。
+    """
+    _ensure(
+        con,
+        f"""CREATE TABLE IF NOT EXISTS raw.prices (
+            symbol VARCHAR NOT NULL,
+            date DATE NOT NULL,
+            open DOUBLE, high DOUBLE, low DOUBLE, close DOUBLE, volume BIGINT,
+            {_AUDIT}
+        )""",
+    )
+    total = 0
+    for symbol, df in prices.items():
+        if df is None or len(df) == 0:
+            continue
+        if "close" not in df.columns:
+            # docstring 承诺"需含 close"就 fail-fast，不静默灌 NULL 让 dbt 晚炸。
+            raise ValueError(f"{symbol}: 价格 DataFrame 缺 close 列，拒绝装载")
+        src = df[~df.index.duplicated(keep="last")] if df.index.has_duplicates else df
+        frame = pd.DataFrame(index=src.index)
+        for col in ("open", "high", "low", "close", "volume"):
+            frame[col] = src[col] if col in src.columns else None
+        frame = frame.reset_index(names="date")
+        frame.insert(0, "symbol", str(symbol).upper())
+        frame["date"] = pd.to_datetime(frame["date"]).dt.tz_localize(None).dt.date
+        # 缩水守卫：批次键是 symbol 的全量替换——yfinance 限流/故障返回"非空但
+        # 截断"的批（已知失败模式）会把几百根历史原子性换成几根残段，下游 52 周
+        # 高点/收益全被静默污染。新批不足存量一半时拒绝装载（保住旧数据、留痕）。
+        existing = con.execute(
+            "SELECT count(*) FROM raw.prices WHERE symbol = ?", [str(symbol).upper()]
+        ).fetchone()[0]
+        if existing > 20 and len(frame) < existing * 0.5:
+            logger.warning(
+                f"load_prices SKIP {symbol}: 新批 {len(frame)} 行 < 存量 {existing} 行的一半"
+                "（疑似截断响应），保留旧数据不替换"
+            )
+            continue
+        with _tx(con):
+            con.execute("DELETE FROM raw.prices WHERE symbol = ?", [str(symbol).upper()])
+            con.register("_stg_prices", frame)
+            con.execute(
+                """INSERT INTO raw.prices (symbol, date, open, high, low, close, volume)
+                   SELECT symbol, date, open, high, low, close, volume FROM _stg_prices"""
+            )
+            con.unregister("_stg_prices")
+        total += len(frame)
+    return total
+
+
+# --------------------------------------------------------------------------- #
+# NYSE 交易日历（dim_date 的数据源）
+# --------------------------------------------------------------------------- #
+def load_trading_days(con: DuckDBPyConnection, start: str, end: str) -> int:
+    """NYSE 交易日 -> `raw.trading_days`（重跑全量替换）。
+
+    dbt 的 `dim_date` 用它补齐「是否交易日/周几/年月季」等属性；日历真相来自
+    `pandas_market_calendars`（含一次性休市/半日市），不手搓规则。
+    """
+    _ensure(
+        con,
+        f"""CREATE TABLE IF NOT EXISTS raw.trading_days (
+            date DATE NOT NULL,
+            is_early_close BOOLEAN NOT NULL,
+            {_AUDIT}
+        )""",
+    )
+    cal = TradingCalendar()
+    days = cal.get_trading_days(start, end)
+    early = set(cal.early_closes(start, end))
+    frame = pd.DataFrame(
+        {"date": list(days), "is_early_close": [d in early for d in days]}
+    )
+    with _tx(con):
+        con.execute("DELETE FROM raw.trading_days")
+        con.register("_stg_days", frame)
+        con.execute(
+            "INSERT INTO raw.trading_days (date, is_early_close) SELECT date, is_early_close FROM _stg_days"
+        )
+        con.unregister("_stg_days")
+    return len(frame)
+
+
+# --------------------------------------------------------------------------- #
+# positions（真实持仓快照）
+# --------------------------------------------------------------------------- #
+def load_positions(
+    con: DuckDBPyConnection, portfolio: Portfolio, as_of: str
+) -> int:
+    """真实持仓 lots + 现金 -> `raw.positions` / `raw.portfolio_cash`。
+
+    批次键 = as_of（同一快照日重跑替换；不同日期追加 -> 持仓历史随时间积累）。
+    """
+    _ensure(
+        con,
+        f"""CREATE TABLE IF NOT EXISTS raw.positions (
+            as_of DATE NOT NULL,
+            symbol VARCHAR NOT NULL,
+            shares DOUBLE NOT NULL,
+            cost_basis DOUBLE NOT NULL,
+            open_date DATE NOT NULL,
+            {_AUDIT}
+        )""",
+    )
+    _ensure(
+        con,
+        f"""CREATE TABLE IF NOT EXISTS raw.portfolio_cash (
+            as_of DATE NOT NULL,
+            cash DOUBLE NOT NULL,
+            {_AUDIT}
+        )""",
+    )
+    with _tx(con):
+        con.execute("DELETE FROM raw.positions WHERE as_of = ?", [as_of])
+        con.execute("DELETE FROM raw.portfolio_cash WHERE as_of = ?", [as_of])
+        for p in portfolio.positions:
+            con.execute(
+                "INSERT INTO raw.positions (as_of, symbol, shares, cost_basis, open_date) VALUES (?,?,?,?,?)",
+                [as_of, p.symbol, p.shares, p.cost_basis, str(p.open_date)],
+            )
+        con.execute(
+            "INSERT INTO raw.portfolio_cash (as_of, cash) VALUES (?,?)", [as_of, portfolio.cash]
+        )
+    return len(portfolio.positions)
+
+
+# --------------------------------------------------------------------------- #
+# trades（live PaperBroker 成交流水）
+# --------------------------------------------------------------------------- #
+def load_trades(
+    con: DuckDBPyConnection, trades: Iterable[Mapping], run_id: str
+) -> int:
+    """成交记录（`PaperBroker.orders` 的 dict 形状）-> `raw.trades`。批次键 = run_id。
+
+    dict 键：ticker / action / price / shares / trace_id（缺失落 NULL）。
+    """
+    _ensure(
+        con,
+        f"""CREATE TABLE IF NOT EXISTS raw.trades (
+            run_id VARCHAR NOT NULL,
+            seq INTEGER NOT NULL,
+            symbol VARCHAR NOT NULL,
+            action VARCHAR NOT NULL,
+            price DOUBLE,
+            shares DOUBLE,
+            trace_id VARCHAR,
+            {_AUDIT}
+        )""",
+    )
+    n = 0
+    with _tx(con):
+        con.execute("DELETE FROM raw.trades WHERE run_id = ?", [run_id])
+        for i, t in enumerate(trades):
+            con.execute(
+                "INSERT INTO raw.trades (run_id, seq, symbol, action, price, shares, trace_id) VALUES (?,?,?,?,?,?,?)",
+                [
+                    run_id,
+                    i,
+                    str(t.get("ticker", "")).upper(),
+                    str(t.get("action", "")),
+                    t.get("price"),
+                    t.get("shares"),
+                    t.get("trace_id"),
+                ],
+            )
+            n += 1
+    return n
+
+
+# --------------------------------------------------------------------------- #
+# signals（SignalGenerator 输出）
+# --------------------------------------------------------------------------- #
+def load_signals(
+    con: DuckDBPyConnection, symbol: str, signals: pd.DataFrame
+) -> int:
+    """`SignalGenerator.generate` 的输出 -> `raw.signals`。批次键 = symbol。
+
+    列：trend/momentum/ma_cross/breakout/composite_signal + signal_strength（枚举文本）。
+    """
+    _ensure(
+        con,
+        f"""CREATE TABLE IF NOT EXISTS raw.signals (
+            symbol VARCHAR NOT NULL,
+            date DATE NOT NULL,
+            trend_signal INTEGER, momentum_signal INTEGER, ma_cross_signal INTEGER,
+            breakout_signal INTEGER, composite_signal DOUBLE, signal_strength VARCHAR,
+            {_AUDIT}
+        )""",
+    )
+    frame = signals.copy()
+    frame["signal_strength"] = frame["signal_strength"].astype("string")
+    frame = frame.reset_index(names="date")
+    frame["date"] = pd.to_datetime(frame["date"]).dt.tz_localize(None).dt.date
+    frame.insert(0, "symbol", str(symbol).upper())
+    with _tx(con):
+        con.execute("DELETE FROM raw.signals WHERE symbol = ?", [str(symbol).upper()])
+        con.register("_stg_signals", frame)
+        con.execute(
+            """INSERT INTO raw.signals
+               (symbol, date, trend_signal, momentum_signal, ma_cross_signal,
+                breakout_signal, composite_signal, signal_strength)
+               SELECT symbol, date, trend_signal, momentum_signal, ma_cross_signal,
+                      breakout_signal, composite_signal, signal_strength
+               FROM _stg_signals"""
+        )
+        con.unregister("_stg_signals")
+    return len(frame)
+
+
+# --------------------------------------------------------------------------- #
+# news（RSS 头条）
+# --------------------------------------------------------------------------- #
+def load_news(con: DuckDBPyConnection, items: Iterable) -> int:
+    """`NewsItem` 流 -> `raw.news`。幂等键 = link（同链接不重复入库，新闻只增不删）。
+
+    与其它 loader 的 delete-then-insert 不同：新闻是**追加型**数据（历史头条没有
+    "重载一批"的语义），用 link 反连接去重。返回本次新插入的行数。
+    """
+    _ensure(con, _DDL["news"])
+    rows = [
+        (
+            it.symbol,
+            it.title,
+            it.summary,
+            it.link,
+            it.published.replace(tzinfo=None) if getattr(it, "published", None) else None,
+            it.source,
+        )
+        for it in items
+        if getattr(it, "title", "") and getattr(it, "link", "")
+    ]
+    if not rows:
+        return 0
+    frame = pd.DataFrame(
+        rows, columns=["symbol", "title", "summary", "link", "published", "source"]
+    ).drop_duplicates(subset=["link"])
+    with _tx(con):
+        con.register("_stg_news", frame)
+        n = con.execute(
+            """INSERT INTO raw.news (symbol, title, summary, link, published, source)
+               SELECT s.symbol, s.title, s.summary, s.link, s.published, s.source
+               FROM _stg_news s
+               WHERE NOT EXISTS (SELECT 1 FROM raw.news n WHERE n.link = s.link)"""
+        ).fetchone()
+        con.unregister("_stg_news")
+    # duckdb INSERT 返回影响行数（Count 列）
+    return int(n[0]) if n else 0
+
+
+def load_news_scores(
+    con: DuckDBPyConnection, scored: Iterable[Mapping], model: str = ""
+) -> int:
+    """`news_scorer.score_news` 输出 -> `raw.news_scores`。幂等键 = link（重打分覆盖旧分）。
+
+    只入**打出分**的条目（sentiment=None 的诚实缺失不落库——空分入库会被下游当 0 用）。
+    """
+    _ensure(con, _DDL["news_scores"])
+    rows = [
+        (getattr(r["item"], "link", None), float(r["sentiment"]), str(r.get("label", "")))
+        for r in scored
+        if r.get("sentiment") is not None and getattr(r.get("item"), "link", None)
+    ]
+    if not rows:
+        return 0
+    with _tx(con):
+        for link, sentiment, label in rows:
+            con.execute("DELETE FROM raw.news_scores WHERE link = ?", [link])
+            con.execute(
+                "INSERT INTO raw.news_scores (link, sentiment, label, model) VALUES (?,?,?,?)",
+                [link, sentiment, label, model],
+            )
+    return len(rows)
+
+
+def load_event_odds(con: DuckDBPyConnection, odds: Iterable, as_of: str) -> int:
+    """Polymarket 事件概率快照 -> `raw.event_odds`。幂等键 = as_of（同日重跑全量替换，
+    跨日累积 -> 概率时间序列，BI 可画事件概率演变线）。"""
+    _ensure(con, _DDL["event_odds"])
+    rows = [o.as_dict() for o in odds if getattr(o, "market_id", "")]
+    with _tx(con):
+        con.execute("DELETE FROM raw.event_odds WHERE as_of = ?", [as_of])
+        for r in rows:
+            con.execute(
+                """INSERT INTO raw.event_odds
+                   (as_of, market_id, condition_id, event_title, question,
+                    yes_price, volume_24h, end_date, category)
+                   VALUES (?,?,?,?,?,?,?,?,?)""",
+                [as_of, r["market_id"], r["condition_id"], r["event_title"],
+                 r["question"], r["yes_price"], r["volume_24h"], r["end_date"], r["category"]],
+            )
+    return len(rows)
+
+
+# --------------------------------------------------------------------------- #
+# backtest（run_backtest 结果：指标行 + 净值曲线）
+# --------------------------------------------------------------------------- #
+def load_backtest(
+    con: DuckDBPyConnection,
+    run_id: str,
+    result: BacktestResult,
+    strategy: str = "",
+    symbol: str = "",
+) -> int:
+    """`BacktestResult` -> `raw.backtest_runs`（指标 1 行）+ `raw.backtest_equity`（曲线）。
+
+    批次键 = run_id。metrics 展开为列（与 `PerformanceReport` 字段一一对应）。
+    """
+    _ensure(
+        con,
+        f"""CREATE TABLE IF NOT EXISTS raw.backtest_runs (
+            run_id VARCHAR NOT NULL,
+            strategy VARCHAR, symbol VARCHAR, fill_timing VARCHAR,
+            total_return DOUBLE, cagr DOUBLE, annual_volatility DOUBLE, sharpe DOUBLE,
+            max_drawdown DOUBLE, win_rate DOUBLE, total_turnover DOUBLE,
+            start_date VARCHAR, end_date VARCHAR, trading_days INTEGER,
+            {_AUDIT}
+        )""",
+    )
+    _ensure(
+        con,
+        f"""CREATE TABLE IF NOT EXISTS raw.backtest_equity (
+            run_id VARCHAR NOT NULL,
+            date DATE NOT NULL,
+            equity DOUBLE NOT NULL,
+            daily_return DOUBLE,
+            {_AUDIT}
+        )""",
+    )
+    m = result.metrics
+    eq = result.equity
+    rets = result.returns.reindex(eq.index)
+    frame = pd.DataFrame(
+        {
+            "date": pd.to_datetime(eq.index).tz_localize(None).date,
+            "equity": eq.to_numpy(dtype=float),
+            "daily_return": rets.to_numpy(dtype=float),
+        }
+    )
+    frame.insert(0, "run_id", run_id)
+    with _tx(con):
+        con.execute("DELETE FROM raw.backtest_runs WHERE run_id = ?", [run_id])
+        con.execute("DELETE FROM raw.backtest_equity WHERE run_id = ?", [run_id])
+        con.execute(
+            """INSERT INTO raw.backtest_runs
+               (run_id, strategy, symbol, fill_timing, total_return, cagr, annual_volatility,
+                sharpe, max_drawdown, win_rate, total_turnover, start_date, end_date, trading_days)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            [
+                run_id, strategy, str(symbol).upper(), result.fill_timing,
+                m.total_return, m.cagr, m.annual_volatility, m.sharpe,
+                m.max_drawdown, m.win_rate, result.total_turnover,
+                m.start, m.end, m.trading_days,
+            ],
+        )
+        con.register("_stg_bt", frame)
+        con.execute(
+            "INSERT INTO raw.backtest_equity (run_id, date, equity, daily_return) "
+            "SELECT run_id, date, equity, daily_return FROM _stg_bt"
+        )
+        con.unregister("_stg_bt")
+    return 1 + len(frame)
