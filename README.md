@@ -18,7 +18,7 @@ yet because no dashboard has been built.
 
 *Placeholder.*
 
-Intended shape. None of it is built beyond the scaffolding in this repository:
+Intended shape. The generator stage is built; everything downstream of `data/raw` is not:
 
 ```
 seeded synthetic generator
@@ -31,12 +31,48 @@ seeded synthetic generator
 Both presentation layers are intended to read the same marts, so a number shown in Power BI and
 the same number on the web dashboard come from one definition rather than two implementations.
 
+## Synthetic data
+
+Private markets fund-level data is not publicly available at the LP position level, so LP Lens
+generates its own. **All of it is fabricated** — no manager, fund or investor in the output is a
+real entity, and no figure is a real reported number.
+
+```bash
+python -m lp_lens.generate --config configs/generator.yaml --out data/raw
+```
+
+One seed in `configs/generator.yaml` drives every draw, and the same seed with the same config
+produces byte-identical Parquet. Output goes to `data/raw/`, which is gitignored — generated data
+is fully determined by the config and the code, so committing it would store something already
+reproducible.
+
+| Table | Grain | Rows |
+|---|---|---|
+| `managers` | one row per GP | 25 |
+| `funds` | one row per fund | 60 |
+| `investors` | one row per LP | 12 |
+| `commitments` | investor × fund | 156 |
+| `cash_flows` | one row per transaction | 3,078 |
+| `nav` | fund × investor × quarter end | 4,454 |
+| `fx_rates` | date × currency pair | 5,295 |
+| `public_index` | date × index | 5,295 |
+
+The two fact grains are worth noting, because they are the shape the replaced equities project did
+not have: `cash_flows` is irregular, with a row only where a transaction landed, while `nav` is a
+regular quarterly grid — and both are keyed on a *pair* of entities rather than a single
+instrument. Amounts are unsigned magnitudes, with `flow_type` carrying the direction. Fund outcomes
+are drawn per strategy so the book spans loss-making to top quartile, and NAV is derived from
+cumulative paid-in and distributions rather than drawn, which is what makes it trace a J-curve.
+
+[`src/lp_lens/generate/README.md`](src/lp_lens/generate/README.md) documents the entities, the
+sign convention, the lifecycle and outcome model, and every invariant the generator enforces.
+
 ## Data model
 
-*Placeholder.*
+*Placeholder — the star schema and the marts are Phase 2.*
 
-To be documented: the entity set (managers, funds, investors, commitments, cash flows, NAV, FX
-rates, public index), the star schema, and the declared grain of every fact and mart.
+The source entities and their grains are documented under [Synthetic data](#synthetic-data) above.
+Still to be documented: the star schema, and the declared grain of every mart.
 
 ## Metrics definitions
 
@@ -76,6 +112,9 @@ python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 pre-commit install
 pytest
+
+# Generate the synthetic source data into data/raw/ (gitignored).
+python -m lp_lens.generate --config configs/generator.yaml --out data/raw
 ```
 
 Credentials, once Snowflake enters the picture, come only from environment variables.
