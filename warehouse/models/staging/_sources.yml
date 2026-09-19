@@ -1,0 +1,141 @@
+version: 2
+
+sources:
+  - name: raw
+    description: >
+      Parquet produced by the Phase 1 generator (`python -m lp_lens.generate`). All of it is
+      synthetic; no manager, fund or investor named in it is a real entity. The generator is
+      seeded, so this source is reproducible from `configs/generator.yaml` rather than being a
+      snapshot that has to be stored.
+
+      Tests here are deliberately limited to whether the raw files are internally sane -- grain
+      uniqueness, required fields, allowed category values. Referential integrity and every
+      derived property are tested on the staging and mart models rather than twice.
+    schema: "{{ env_var('LP_LENS_RAW_SCHEMA', 'raw') }}"
+    meta:
+      # dbt-duckdb reads each table straight out of Parquet with no load step, substituting {name}
+      # for the table name. This key is DuckDB-specific and is ignored by other adapters, so the
+      # same source definition compiles against Snowflake tables in RAW (or a CI_*_RAW schema).
+      external_location: "read_parquet('{{ env_var('LP_LENS_RAW_DIR', 'data/raw') }}/{name}.parquet')"
+    tables:
+      - name: managers
+        description: "One row per general partner."
+        columns:
+          - name: manager_id
+            description: "Surrogate key, MGRnnnn."
+            data_tests: [unique, not_null]
+
+      - name: funds
+        description: "One row per fund."
+        columns:
+          - name: fund_id
+            description: "Surrogate key, FUNDnnnn."
+            data_tests: [unique, not_null]
+          - name: manager_id
+            data_tests: [not_null]
+          - name: strategy
+            data_tests:
+              - not_null
+              - accepted_values:
+                  arguments:
+                    values:
+                      - Buyout
+                      - Venture
+                      - Growth
+                      - Private Credit
+                      - Real Estate
+                      - Infrastructure
+                      - Secondaries
+          - name: currency
+            data_tests:
+              - not_null
+              - accepted_values:
+                  arguments:
+                    values: [USD, EUR]
+
+      - name: investors
+        description: "One row per limited partner."
+        columns:
+          - name: investor_id
+            description: "Surrogate key, LPnnn."
+            data_tests: [unique, not_null]
+          - name: investor_type
+            data_tests:
+              - not_null
+              - accepted_values:
+                  arguments:
+                    values: [Pension, Endowment, Insurance, Family Office, Sovereign Wealth]
+
+      - name: commitments
+        description: "One row per investor per fund. An investor never commits to the same fund twice."
+        columns:
+          - name: commitment_id
+            data_tests: [unique, not_null]
+          - name: commitment_amount
+            data_tests: [not_null]
+          - name: commitment_date
+            data_tests: [not_null]
+        data_tests:
+          - unique_combination_of_columns:
+              arguments:
+                combination_of_columns: [investor_id, fund_id]
+
+      - name: cash_flows
+        description: >
+          One row per transaction, at irregular dates. `amount` is an unsigned magnitude; the
+          direction is carried by `flow_type`.
+        columns:
+          - name: cash_flow_id
+            data_tests: [unique, not_null]
+          - name: flow_date
+            data_tests: [not_null]
+          - name: flow_type
+            data_tests:
+              - not_null
+              - accepted_values:
+                  arguments:
+                    values: [capital_call, management_fee, distribution, recallable_distribution]
+          - name: amount
+            data_tests: [not_null]
+
+      - name: nav
+        description: "Quarter-end net asset value per fund per investor, in the fund's currency."
+        columns:
+          - name: quarter_end
+            data_tests: [not_null]
+          - name: nav
+            data_tests: [not_null]
+        data_tests:
+          - unique_combination_of_columns:
+              arguments:
+                combination_of_columns: [fund_id, investor_id, quarter_end]
+
+      - name: fx_rates
+        description: >
+          Calendar-daily EUR to USD rates covering every date from the earliest vintage to the
+          as-of date. Calendar-daily rather than business-daily so that a quarter end falling on a
+          weekend still has a rate.
+        columns:
+          - name: rate_date
+            data_tests: [not_null]
+          - name: rate
+            data_tests: [not_null]
+        data_tests:
+          - unique_combination_of_columns:
+              arguments:
+                combination_of_columns: [rate_date, from_currency, to_currency]
+
+      - name: public_index
+        description: >
+          Calendar-daily synthetic total-return index levels, used as the PME benchmark. Total
+          return means the level already includes reinvested income, so PME needs no dividend
+          adjustment. Not a real index.
+        columns:
+          - name: index_date
+            data_tests: [not_null]
+          - name: level
+            data_tests: [not_null]
+        data_tests:
+          - unique_combination_of_columns:
+              arguments:
+                combination_of_columns: [index_date, index_name]

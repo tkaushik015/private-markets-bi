@@ -23,10 +23,18 @@ repos:
         args: [--fix]
       - id: ruff-format
 
-  - repo: https://github.com/sqlfluff/sqlfluff
-    rev: 4.3.0
+  # A local hook rather than the upstream sqlfluff repo. The dbt templater has to import dbt and
+  # the duckdb adapter to compile each model, and it needs the lp_lens package importable for the
+  # Python models to parse. pre-commit's isolated hook environment has none of that, so this runs
+  # sqlfluff from the project environment instead.
+  - repo: local
     hooks:
       - id: sqlfluff-lint
-        # Models only. Macro files are pure Jinja control flow with no parseable SQL of their
-        # own, so linting them produces noise rather than signal.
+        name: sqlfluff lint (dbt templater)
+        # One invocation over the models directory. Passing each file as an argument makes the
+        # dbt templater open DuckDB once per file, and DuckDB refuses a second lock on the same
+        # path. `sqlfluff lint warehouse/models` compiles the project once instead.
+        entry: sqlfluff lint warehouse/models
+        language: system
+        pass_filenames: false
         files: ^warehouse/models/.*\.sql$

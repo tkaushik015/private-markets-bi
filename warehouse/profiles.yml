@@ -1,0 +1,59 @@
+# Credentials come only from environment variables. Nothing account-specific is committed.
+# The DuckDB `local` target is the default: it is what CI runs and what a developer uses
+# without a Snowflake account. The three snowflake_* targets are for a real account after
+# infra/snowflake/setup.sql has been applied.
+#
+# Required for any snowflake_* target:
+#   SNOWFLAKE_ACCOUNT
+#   SNOWFLAKE_USER
+#   SNOWFLAKE_PRIVATE_KEY_PATH
+# Optional overrides have the defaults declared in infra/snowflake/setup.sql.
+lp_lens:
+  target: local
+  outputs:
+    local:
+      type: duckdb
+      # Relative to the process working directory, not to this file. Every tool in this project is
+      # run from the repository root -- dbt with `--project-dir warehouse`, and sqlfluff's dbt
+      # templater from wherever pre-commit invokes it -- so the default is repo-root relative and
+      # `data/warehouse/` is kept in git by a .gitkeep so a fresh clone can lint without building
+      # first. The env var is what CI and the pytest harness override to a scratch path.
+      path: "{{ env_var('LP_LENS_DB_PATH', 'data/warehouse/lp_lens.duckdb') }}"
+      threads: 4
+
+    snowflake_dev:
+      type: snowflake
+      account: "{{ env_var('SNOWFLAKE_ACCOUNT') }}"
+      user: "{{ env_var('SNOWFLAKE_USER') }}"
+      private_key_path: "{{ env_var('SNOWFLAKE_PRIVATE_KEY_PATH') }}"
+      role: "{{ env_var('SNOWFLAKE_ROLE', 'LP_LENS_TRANSFORMER') }}"
+      warehouse: "{{ env_var('SNOWFLAKE_WAREHOUSE', 'LP_LENS_WH') }}"
+      database: "{{ env_var('SNOWFLAKE_DATABASE', 'LP_LENS_DEV') }}"
+      schema: MARTS
+      threads: 4
+      # Key-pair only. A password field is deliberately absent.
+
+    snowflake_ci:
+      type: snowflake
+      account: "{{ env_var('SNOWFLAKE_ACCOUNT') }}"
+      user: "{{ env_var('SNOWFLAKE_USER') }}"
+      private_key_path: "{{ env_var('SNOWFLAKE_PRIVATE_KEY_PATH') }}"
+      role: "{{ env_var('SNOWFLAKE_ROLE', 'LP_LENS_TRANSFORMER') }}"
+      warehouse: "{{ env_var('SNOWFLAKE_WAREHOUSE', 'LP_LENS_WH') }}"
+      database: "{{ env_var('SNOWFLAKE_DATABASE', 'LP_LENS_DEV') }}"
+      # generate_schema_name prefixes custom schemas with this value, producing
+      # CI_PR_4_STAGING / CI_PR_4_INTERMEDIATE / CI_PR_4_MARTS so a PR cannot
+      # overwrite the shared MARTS schema. Pair with load_raw --raw-schema CI_PR_4_RAW.
+      schema: "{{ env_var('LP_LENS_CI_SCHEMA', 'CI_LOCAL') }}"
+      threads: 4
+
+    snowflake_prod:
+      type: snowflake
+      account: "{{ env_var('SNOWFLAKE_ACCOUNT') }}"
+      user: "{{ env_var('SNOWFLAKE_USER') }}"
+      private_key_path: "{{ env_var('SNOWFLAKE_PRIVATE_KEY_PATH') }}"
+      role: "{{ env_var('SNOWFLAKE_ROLE_PROD', 'LP_LENS_TRANSFORMER') }}"
+      warehouse: "{{ env_var('SNOWFLAKE_WAREHOUSE', 'LP_LENS_WH') }}"
+      database: "{{ env_var('SNOWFLAKE_DATABASE_PROD', 'LP_LENS_PROD') }}"
+      schema: MARTS
+      threads: 4

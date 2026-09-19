@@ -1,0 +1,20 @@
+{
+  "dbt_generated_at": "2026-09-19T07:13:03.816255Z",
+  "as_of_quarter": "2026-06-30 00:00:00",
+  "tables": [
+    "dim_fund",
+    "dim_manager",
+    "dim_investor",
+    "dim_strategy",
+    "fct_fund_performance_quarterly",
+    "fct_portfolio_performance_quarterly"
+  ],
+  "row_counts": {
+    "dim_fund": 60,
+    "dim_manager": 25,
+    "dim_investor": 12,
+    "dim_strategy": 7,
+    "fct_fund_performance_quarterly": 4454,
+    "fct_portfolio_performance_quarterly": 656
+  }
+}

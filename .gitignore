@@ -35,9 +35,21 @@ logs/
 # The generator is seeded and deterministic, so raw Parquet and any DuckDB file built
 # from it are reproducible from source and do not belong in git.
 data/raw/
-data/warehouse/
 *.duckdb
 *.duckdb.wal
+# The Streamlit Community Cloud default is this committed synthetic warehouse so a
+# public deploy can run without Snowflake or a local dbt build.
+!app/data/demo.duckdb
+#
+# The warehouse directory's *contents* are ignored rather than the directory itself, so the
+# .gitkeep below can be re-included. Git cannot re-include a file inside an excluded directory,
+# only inside an excluded set of paths.
+#
+# The .gitkeep is tracked because sqlfluff's dbt templater opens a DuckDB connection in order to
+# build the adapter, so linting needs this path to be openable even in a fresh clone that has not
+# built anything yet. Only the .gitkeep is tracked; the database files are not.
+data/warehouse/*
+!data/warehouse/.gitkeep
 
 # ----------------------------------------------------------------------
 # Python
@@ -48,6 +60,7 @@ __pycache__/
 *.egg
 build/
 dist/
+node_modules/
 .venv/
 venv/
 ENV/

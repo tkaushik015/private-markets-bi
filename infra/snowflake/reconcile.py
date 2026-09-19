@@ -23,8 +23,11 @@ difference.
 
 Usage:
     python infra/snowflake/reconcile.py --duckdb <path/to/lp_lens.duckdb> --env-file .env.snowflake.local
+    python infra/snowflake/reconcile.py --duckdb <path> --schema marts
+    python infra/snowflake/reconcile.py --negative-control --duckdb <path>
 
-Exit code: 0 if everything matches, 1 if anything differs.
+Exit code: 0 if everything matches (or the negative control correctly detects a changed cell),
+1 if anything differs (or the negative control fails to notice).
 """
 
 from __future__ import annotations
@@ -188,16 +191,63 @@ def snowflake_tables(schema: str) -> dict:
         con.close()
 
 
+def perturb_one_numeric_cell(cols: list[str], rows: list[tuple]) -> tuple[list[tuple], str, int]:
+    """Return (rows with one numeric cell changed, column name, row index).
+
+    Used by the negative control: a comparison that cannot fail is worthless. Changing a
+    single already-nonzero number by 10% is enough to trip the 1e-9 relative check, and
+    small enough that it cannot be an accidental empty-table case.
+    """
+    if not rows:
+        raise SystemExit("negative control needs at least one row")
+    for col_idx, _name in enumerate(cols):
+        for row_idx, row in enumerate(rows):
+            value = norm(row[col_idx])
+            if isinstance(value, int) and value != 0:
+                new = list(row)
+                new[col_idx] = value + 1
+                return [tuple(new) if i == row_idx else r for i, r in enumerate(rows)], cols[col_idx], row_idx
+            if isinstance(value, float) and value != 0.0:
+                new = list(row)
+                new[col_idx] = value * 1.10
+                return [tuple(new) if i == row_idx else r for i, r in enumerate(rows)], cols[col_idx], row_idx
+    raise SystemExit("negative control could not find a nonzero numeric cell to perturb")
+
+
+def run_negative_control(duck: dict) -> int:
+    """Prove compare_table reports a single changed cell. Returns 0 on detection, 1 if not."""
+    if not duck:
+        print("[negative-control] no tables to perturb")
+        return 1
+    name = next(iter(sorted(duck)))
+    cols, rows = duck[name]
+    perturbed, column, row_idx = perturb_one_numeric_cell(cols, rows)
+    result = compare_table(name, cols, rows, cols, perturbed)
+    detected = bool(result["problems"]) and column.lower() in {c.lower() for c in result["columns_mismatched"]}
+    print(
+        f"[negative-control] {name}.{column} row {row_idx}: {'caught' if detected else 'MISSED'} ({result['problems']})"
+    )
+    return 0 if detected else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--duckdb", type=Path, required=True, help="DuckDB file built from the same raw snapshot")
     p.add_argument("--schema", default="marts", help="schema to reconcile on both engines (default: marts)")
     p.add_argument("--env-file", type=Path, help="KEY=VALUE file, e.g. .env.snowflake.local")
+    p.add_argument(
+        "--negative-control",
+        action="store_true",
+        help="perturb one cell of the DuckDB side against itself and require a DIFF (no Snowflake)",
+    )
     args = p.parse_args(argv)
     if args.env_file:
         sfconn.read_env_file(args.env_file)
 
     duck = duckdb_tables(args.duckdb, args.schema)
+    if args.negative_control:
+        return run_negative_control(duck)
+
     try:
         snow = snowflake_tables(args.schema)
     except Exception as exc:
