@@ -30,3 +30,6 @@ models:
 # spine comes from the dispatch macros inherited in Phase 0, and surrogate keys are not used
 # because every grain has a natural key. Skipping it keeps `dbt build` offline, so CI does not
 # need a `dbt deps` step or a network call to the package hub.
+#
+# Profile targets: `local` (DuckDB, default, what CI runs), `snowflake_dev`, `snowflake_ci`,
+# `snowflake_prod`. See warehouse/profiles.yml. Snowflake has not been run from this repo.

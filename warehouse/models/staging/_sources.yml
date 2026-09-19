@@ -11,10 +11,11 @@ sources:
       Tests here are deliberately limited to whether the raw files are internally sane -- grain
       uniqueness, required fields, allowed category values. Referential integrity and every
       derived property are tested on the staging and mart models rather than twice.
+    schema: "{{ env_var('LP_LENS_RAW_SCHEMA', 'raw') }}"
     meta:
       # dbt-duckdb reads each table straight out of Parquet with no load step, substituting {name}
-      # for the table name. This key is DuckDB-specific and is ignored by other adapters, which is
-      # what lets the same models compile against real Snowflake tables in Phase 3.
+      # for the table name. This key is DuckDB-specific and is ignored by other adapters, so the
+      # same source definition compiles against Snowflake tables in RAW (or a CI_*_RAW schema).
       external_location: "read_parquet('{{ env_var('LP_LENS_RAW_DIR', 'data/raw') }}/{name}.parquet')"
     tables:
       - name: managers
