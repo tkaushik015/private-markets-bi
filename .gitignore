@@ -60,6 +60,7 @@ __pycache__/
 *.egg
 build/
 dist/
+node_modules/
 .venv/
 venv/
 ENV/
