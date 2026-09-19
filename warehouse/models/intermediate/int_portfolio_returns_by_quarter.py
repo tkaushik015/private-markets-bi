@@ -12,9 +12,11 @@ averages of fund ratios.
 
 from __future__ import annotations
 
+import os
+
 import pandas as pd
 
-from lp_lens.metrics.returns import build_lp_flow_vector, ks_pme, xirr
+# dbt.config() arguments must be Python literals. The Snowpark wheel path is in schema.yml.
 
 
 def compute_portfolio_returns(
@@ -24,6 +26,8 @@ def compute_portfolio_returns(
     index: pd.DataFrame,
 ) -> pd.DataFrame:
     """Return one row per (investor_id, as_of_quarter) with pooled net_irr and ks_pme."""
+    from lp_lens.metrics.returns import build_lp_flow_vector, ks_pme, xirr
+
     index_by_date = dict(zip(index["index_date"], index["index_level"], strict=True))
 
     flows = flows.sort_values(["investor_id", "flow_date"])
@@ -72,6 +76,13 @@ def compute_portfolio_returns(
 
 def model(dbt, session):
     dbt.config(materialized="table")
+    module = type(session).__module__ if session is not None else ""
+    if "snowpark" in module and not os.environ.get("LP_LENS_SNOWPARK_WHEEL", "").strip():
+        raise RuntimeError(
+            "LP_LENS_SNOWPARK_WHEEL is unset. Stage the slim metrics wheel with "
+            "`python infra/snowflake/load_raw.py --stage-wheel` and set the variable "
+            "to @<database>.RAW.LP_LENS_PACKAGES/lp_lens-0.1.0-py3-none-any.whl"
+        )
     return compute_portfolio_returns(
         spine=dbt.ref("int_quarter_spine").df(),
         flows=dbt.ref("int_cash_flows_usd").df(),

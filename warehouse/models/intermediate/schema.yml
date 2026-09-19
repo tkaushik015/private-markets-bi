@@ -74,6 +74,11 @@ models:
             combination_of_columns: [fund_id, investor_id, quarter_end]
 
   - name: int_returns_by_quarter
+    config:
+      # Snowpark only. DuckDB already has the editable lp-lens install on sys.path.
+      # dbt.config() in the .py file cannot take a variable wheel path (literal_eval).
+      packages: "{{ ['pandas', 'numpy', 'scipy'] if target.type == 'snowflake' else [] }}"
+      imports: "{{ [env_var('LP_LENS_SNOWPARK_WHEEL')] if target.type == 'snowflake' and env_var('LP_LENS_SNOWPARK_WHEEL', '') != '' else [] }}"
     description: >
       Net IRR and KS-PME per fund x investor x quarter end, computed by a dbt Python model that
       imports lp_lens.metrics.returns -- the same module the reconciliation tests call. IRR has no
@@ -82,6 +87,9 @@ models:
 
       Both columns are nullable on purpose and are emitted as pandas Float64 so a missing value
       lands as NULL rather than NaN. A NaN would pass a not-null test and then read as a number.
+
+      On Snowflake the same module is imported from a slim wheel staged at
+      RAW.LP_LENS_PACKAGES (issue #5). The solver is not copied into SQL.
     columns:
       - name: net_irr
         description: "NULL, never 0, where no rate exists."
@@ -92,11 +100,14 @@ models:
             combination_of_columns: [fund_id, investor_id, as_of_quarter]
 
   - name: int_portfolio_returns_by_quarter
+    config:
+      packages: "{{ ['pandas', 'numpy', 'scipy'] if target.type == 'snowflake' else [] }}"
+      imports: "{{ [env_var('LP_LENS_SNOWPARK_WHEEL')] if target.type == 'snowflake' and env_var('LP_LENS_SNOWPARK_WHEEL', '') != '' else [] }}"
     description: >
       Net IRR and KS-PME per investor x quarter end, solved over every flow of every position pooled
       into one vector. A separate model rather than an aggregation of int_returns_by_quarter because
       IRR is not additive: no average of fund IRRs, weighted or otherwise, equals the rate the
-      pooled stream produced.
+      pooled stream produced. Same Snowpark wheel as int_returns_by_quarter; one solver.
     columns:
       - name: net_irr
       - name: ks_pme

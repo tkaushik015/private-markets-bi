@@ -23,9 +23,15 @@ mode this whole file is trying to avoid.
 
 from __future__ import annotations
 
+import os
+
 import pandas as pd
 
-from lp_lens.metrics.returns import build_lp_flow_vector, ks_pme, xirr
+# lp_lens is imported inside the compute function, not at module top. On Snowflake the
+# slim metrics wheel is added to the Snowpark session by the YAML `imports` config,
+# which is applied when model() runs. A top-level import would fail on Snowpark.
+# dbt.config() arguments must be Python literals -- dbt parses them with ast.literal_eval
+# -- so the wheel path lives in schema.yml, not in a **kwargs call here.
 
 
 def compute_position_returns(
@@ -35,6 +41,8 @@ def compute_position_returns(
     index: pd.DataFrame,
 ) -> pd.DataFrame:
     """Return one row per (fund_id, investor_id, as_of_quarter) with net_irr and ks_pme."""
+    from lp_lens.metrics.returns import build_lp_flow_vector, ks_pme, xirr
+
     index_by_date = dict(zip(index["index_date"], index["index_level"], strict=True))
     nav_by_key = {
         (fund_id, investor_id, quarter_end): nav_usd
@@ -91,6 +99,13 @@ def compute_position_returns(
 
 def model(dbt, session):
     dbt.config(materialized="table")
+    module = type(session).__module__ if session is not None else ""
+    if "snowpark" in module and not os.environ.get("LP_LENS_SNOWPARK_WHEEL", "").strip():
+        raise RuntimeError(
+            "LP_LENS_SNOWPARK_WHEEL is unset. Stage the slim metrics wheel with "
+            "`python infra/snowflake/load_raw.py --stage-wheel` and set the variable "
+            "to @<database>.RAW.LP_LENS_PACKAGES/lp_lens-0.1.0-py3-none-any.whl"
+        )
     return compute_position_returns(
         spine=dbt.ref("int_quarter_spine").df(),
         flows=dbt.ref("int_cash_flows_usd").df(),
