@@ -37,6 +37,9 @@ logs/
 data/raw/
 *.duckdb
 *.duckdb.wal
+# The Streamlit Community Cloud default is this committed synthetic warehouse so a
+# public deploy can run without Snowflake or a local dbt build.
+!app/data/demo.duckdb
 #
 # The warehouse directory's *contents* are ignored rather than the directory itself, so the
 # .gitkeep below can be re-included. Git cannot re-include a file inside an excluded directory,
