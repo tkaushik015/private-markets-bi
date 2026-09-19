@@ -60,7 +60,7 @@ addopts = "-q --import-mode=importlib"
 [tool.ruff]
 line-length = 120
 target-version = "py310"
-src = ["src", "tests"]
+src = ["src", "tests", "app"]
 
 # Selected explicitly rather than inherited, so a ruff upgrade cannot silently change what CI
 # enforces. E402 matters here: the infra/snowflake scripts adjust sys.path before importing a
