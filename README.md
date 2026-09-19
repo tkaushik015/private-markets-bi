@@ -3,9 +3,11 @@
 Fund-level private markets reporting — commitments, capital calls, distributions and NAV — from
 generated source data through a warehouse to a Power BI semantic model and a web dashboard.
 
-> **Status: In development — Phase 2 warehouse on DuckDB.**
-> Generator and dbt marts are built and tested locally. Snowflake load, Power BI and Streamlit
-> are not. Nothing below reports a result that has not been measured.
+> **Status: In development — Phase 3 Snowflake objects designed, CI still DuckDB.**
+> Generator and dbt marts are built and tested on DuckDB. Snowflake setup, load and
+> targets are in the repo; they have not been applied to a real account from this
+> work. Power BI and Streamlit are not built. Nothing below reports a result that
+> has not been measured.
 
 ## Overview
 
@@ -19,22 +21,21 @@ yet because no dashboard has been built.
 ```
 seeded synthetic generator
   -> data/raw/*.parquet
-  -> dbt (DuckDB): staging -> intermediate -> marts
+  -> DuckDB (CI / local)  OR  Snowflake RAW via PUT + COPY
+  -> dbt: staging -> intermediate -> marts
   -> Power BI semantic model (Import) + Streamlit dashboard   # designed, not deployed
 ```
 
-Snowflake RAW and a Snowflake dbt target are Phase 3; every SQL model uses `adapter.dispatch` so
-the same code can compile there, but that target has not been run. Both presentation layers are
-still intended to read the same marts, so a number shown in Power BI and the same number on the
-web dashboard come from one definition rather than two implementations.
+Every SQL dialect difference goes through `adapter.dispatch`. DuckDB is the default target and
+the only one CI runs. Snowflake targets (`snowflake_dev`, `snowflake_ci`, `snowflake_prod`)
+read the same models; they have not been run against a real account in this work.
 
-**Phase 3 known gap (designed, not deployed).** `int_returns_by_quarter` and
-`int_portfolio_returns_by_quarter` import `lp_lens.metrics.returns`. On DuckDB that import
-resolves against the local package. On Snowflake, dbt Python models run in Snowpark, which has
-no `lp_lens` on `sys.path` unless the wheel is staged or the solver is inlined. IRR/PME will not
-run on a Snowflake target until that packaging step exists. Do not copy the solver into SQL to
-work around it — the project rule is one implementation. Tracked in
-[#5](https://github.com/tkaushik015/private-markets-bi/issues/5).
+**Issue #5 (Snowpark import) — resolved in code, not yet run on Snowflake.** The Python
+models import `lp_lens.metrics.returns` after `dbt.config(imports=[wheel])`. The wheel is a
+slim packaging of that same file (`infra/snowflake/build_metrics_wheel.py`), staged to
+`RAW.LP_LENS_PACKAGES`. The solver is not copied into SQL. A byte-identity test asserts the
+wheel contains `src/lp_lens/metrics/returns.py` unchanged. End-to-end Snowpark execution is
+**designed, not deployed**.
 
 ## Synthetic data
 
@@ -151,10 +152,11 @@ currently holds an empty PBIP scaffold only, described in [`powerbi/README.md`](
 
 `.github/workflows/ci.yml` runs on every pull request and on pushes to `main`. It installs the
 `warehouse` and `dev` extras, generates the seeded Parquet, lints SQL with sqlfluff's dbt
-templater, runs `dbt build` on DuckDB, then pytest (including a mart reconciliation against an
-independent pandas path). Still to be added: a Snowflake dbt target and a deferred build into a
-PR-specific schema (Phase 3), and Best Practice Analyzer checks on the semantic model (Phase 4).
-`.pre-commit-config.yaml` mirrors the lint half of that gate locally.
+templater, runs `dbt build` on DuckDB, then pytest. CI does **not** connect to Snowflake.
+The `snowflake_ci` profile and `CI_<id>_*` schema prefix are designed for a later deferred
+build; they are not wired into GitHub Actions yet. Best Practice Analyzer checks on the
+semantic model remain Phase 4. `.pre-commit-config.yaml` mirrors the lint half of that gate
+locally.
 
 ## How to run
 
@@ -174,9 +176,55 @@ dbt build --project-dir warehouse --profiles-dir warehouse --target local
 pytest
 ```
 
-Snowflake credentials, once that target exists, come only from environment variables. The DuckDB
-path above is the default in `warehouse/profiles.yml`. Python models still cannot run on Snowflake
-as written; see the Phase 3 known gap under [Architecture](#architecture).
+## Snowflake
+
+**Designed, not deployed.** `infra/snowflake/setup.sql` has not been applied to a real
+account from this work, and no load, dbt build or cell-by-cell reconcile has been run
+against Snowflake. Figures below that come from DuckDB are labelled as such.
+
+### Architecture
+
+- `LP_LENS_DEV` / `LP_LENS_PROD` with schemas `RAW`, `STAGING`, `INTERMEDIATE`, `MARTS`.
+- Roles: `LP_LENS_LOADER` (write RAW), `LP_LENS_TRANSFORMER` (read RAW, write the rest),
+  `LP_LENS_REPORTER` (SELECT on MARTS only).
+- One X-Small warehouse, `AUTO_SUSPEND = 60`, resource monitor `LP_LENS_RM` at 20 credits
+  per month, notify at 80%, suspend at 100%.
+- CI schema pattern: target `snowflake_ci` plus `LP_LENS_CI_SCHEMA=CI_PR_<n>` produces
+  `CI_PR_<n>_STAGING` / `_INTERMEDIATE` / `_MARTS`. Pair with
+  `load_raw.py --raw-schema CI_PR_<n>_RAW`.
+
+### How to run (after setup.sql has been applied as ACCOUNTADMIN)
+
+```bash
+cp .env.snowflake.example .env.snowflake.local   # fill account, user, key path
+python infra/snowflake/load_raw.py --raw-dir data/raw --env-file .env.snowflake.local --stage-wheel
+export LP_LENS_SNOWPARK_WHEEL=@LP_LENS_DEV.RAW.LP_LENS_PACKAGES/lp_lens-0.1.0-py3-none-any.whl
+dbt build --project-dir warehouse --profiles-dir warehouse --target snowflake_dev
+python infra/snowflake/reconcile.py --duckdb data/warehouse/lp_lens.duckdb --schema marts --env-file .env.snowflake.local
+```
+
+Credentials are environment variables only, key-pair auth. The example env file commits
+no account identifier. `sfconn.mask` strips the account and key path from any error that
+reaches stdout.
+
+The DuckDB-only negative control (no Snowflake) is:
+
+```bash
+python infra/snowflake/reconcile.py --negative-control --duckdb data/warehouse/lp_lens.duckdb
+```
+
+### Cost guardrails
+
+One warehouse. Sixty-second auto-suspend. Twenty-credit monthly quota that suspends the
+warehouse at 100%. PUBLIC loses trial learning-warehouse and Cortex grants so those cannot
+bill outside the monitor. Credits used have not been measured: the account was not run.
+
+### Snowpark wheel
+
+`infra/snowflake/build_metrics_wheel.py` packages `src/lp_lens/metrics/returns.py` and
+nothing else (`--no-deps`, no duckdb/pydantic). `load_raw.py --stage-wheel` PUTs it to
+`RAW.LP_LENS_PACKAGES`. The Python models lazy-import that module after registering the
+wheel. Do not inline Newton/Brent into SQL.
 
 ## Design decisions
 
