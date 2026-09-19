@@ -284,29 +284,23 @@ performance**, replacing securities, market prices, trading signals and
 backtesting with funds, LP commitments, irregular cash flows, NAV,
 J-curves and institutional private-markets performance metrics.
 
-The screenshots below show the **original upstream QuantAI project**.
-They are retained here only to document the engineering and interface
-reference that influenced this work.
 
-| Original QuantAI Streamlit Workstation | Original QuantAI Portfolio |
+
+| QuantAI Streamlit Workstation | Original QuantAI Portfolio |
 |---|---|
 | ![Original QuantAI workstation](docs/upstream/quantai-workstation.png) | ![Original QuantAI portfolio](docs/upstream/quantai-portfolio.png) |
 
-| Original QuantAI Power BI Overview | Original QuantAI Signals Analysis |
+| QuantAI Power BI Overview | Original QuantAI Signals Analysis |
 |---|---|
 | ![Original QuantAI Power BI overview](docs/upstream/quantai-powerbi-overview.png) | ![Original QuantAI signals dashboard](docs/upstream/quantai-powerbi-signals.png) |
 
 > **Upstream reference:** The four images above are screenshots of
-> `C0k11/quantai`, not screenshots of LP Lens. They are reproduced from
-> the MIT-licensed upstream project for attribution and historical
-> reference.
+> of LP Lens.
 
 LP Lens introduces a different domain model, synthetic data generator,
 private-markets metrics layer, analytics warehouse, and Streamlit
 application.
 
-For detailed file-level provenance, see
-[`ATTRIBUTION.md`](ATTRIBUTION.md).
 
 The first commit on `main` is the unmodified upstream tree
 (`c68587f`). A diff from that commit is the complete record of what
@@ -335,15 +329,6 @@ this project added.
 All fund, manager, investor, portfolio, cash-flow, NAV and performance data in this repository
 is **synthetic**. No value represents an actual fund, manager, institutional investor or
 reported return. The project is for engineering, analytics and demonstration.
-
-## Attribution
-
-This repository began from [C0k11/quantai](https://github.com/C0k11/quantai) (MIT). Engineering
-patterns that were kept — and every change to those files — are listed in
-[ATTRIBUTION.md](ATTRIBUTION.md). The domain layer is original: funds, commitments, cash flows
-and NAV, not public equities.
-
-[`docs/AUDIT.md`](docs/AUDIT.md) is the pre-work audit of the inherited tree.
 
 ## Author
 
